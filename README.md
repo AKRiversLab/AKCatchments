@@ -1,4 +1,4 @@
-# AKCatchments <img src="man/figures/logo.png" align="right" height="139" alt="AKCatchments hex logo" />
+# AKCatchments <img src="man/figures/logo.png" align="right" height="180" alt="AKCatchments hex logo" />
 This package is currently in alpha testing, but we're happy to have anybody 
 attempt the workflows and contribute [Issues](https://github.com/AKRiversLab/AKCatchments/issues)!
 

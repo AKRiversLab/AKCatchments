@@ -72,3 +72,7 @@ ggsave(
   "man/figures/logo.png", sticker,
   width = 43.9, height = 50.8, units = "mm", dpi = 600, bg = "transparent", device = ragg::agg_png
 )
+
+magick::image_read("man/figures/logo.png") |>
+  magick::image_extent("1200x1200", color = "none") |>
+  magick::image_write("man/figures/avatar.png")
