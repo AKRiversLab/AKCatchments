@@ -219,13 +219,66 @@ extract_7z <- function(arc, exdir) {
   invisible(exdir)
 }
 
+# The RGI 7.0 region 01 glacier shapefile in `dir`, downloaded once from NSIDC with the Earthdata Login in the user's
+# netrc file (NSIDC's programmatic access guide). Without one: an error of class ak_manual_download saying what to do.
+glacier_shapefile <- function(dir) {
+  shp <- list.files(dir, "\\.shp$", recursive = TRUE, full.names = TRUE)[1]
+  if (!is.na(shp)) return(shp)
+  by_hand <- paste0("download RGI2000-v7.0-G-01_alaska.zip from https://nsidc.org/data/nsidc-0770 (free Earthdata login) and unzip it into ", dir)
+  netrc <- earthdata_netrc()
+  if (is.na(netrc)) {
+    rlang::abort(paste0("No RGI glacier shapefile in ", dir, ". To download it automatically, put your Earthdata Login in a .netrc ",
+                        "file in your home folder (the line `machine urs.earthdata.nasa.gov login <username> password <password>`; ",
+                        "vignette(\"data-sources\")), or ", by_hand), class = "ak_manual_download", call = NULL)
+  }
+  url <- nsidc_file_url("https://daacdata.apps.nsidc.org/pub/DATASETS/nsidc0770_rgi_v7/", "RGI2000-v7.0-G-01_alaska.zip", netrc)
+  if (is.na(url)) stop("RGI2000-v7.0-G-01_alaska.zip was not found on NSIDC's server; ", by_hand, call. = FALSE)
+  zip <- tryCatch(ak_download(url, file.path(dir, basename(url)), netrc = netrc),
+                  error = \(e) stop("NSIDC refused the download with the Earthdata Login in ", netrc, ": ", conditionMessage(e),
+                                    "\nOr ", by_hand, call. = FALSE))
+  utils::unzip(zip, exdir = dir)
+  list.files(dir, "\\.shp$", recursive = TRUE, full.names = TRUE)[1]
+}
+
+# The user's netrc file with an Earthdata Login entry: ~/.netrc, or _netrc in the Windows user folder (NA if none)
+earthdata_netrc <- function() {
+  homes <- unique(c(path.expand("~"), Sys.getenv("USERPROFILE")))
+  files <- file.path(rep(homes[nzchar(homes)], each = 2), c(".netrc", "_netrc"))
+  files <- files[file.exists(files)]
+  files[vapply(files, \(f) any(grepl("urs.earthdata.nasa.gov", readLines(f, warn = FALSE), fixed = TRUE)), logical(1))][1]
+}
+
+# The URL of `file` somewhere below the NSIDC folder `folder` (HTTPS listings, searched 3 levels deep)
+nsidc_file_url <- function(folder, file, netrc, depth = 3) {
+  resp <- ak_request(folder, netrc = netrc) |> ak_perform()
+  if (!startsWith(httr2::resp_url(resp), folder)) {
+    stop("NSIDC answered with the Earthdata login page (", httr2::resp_url(resp), "): check the username and password in ",
+         netrc, " (vignette(\"data-sources\")).", call. = FALSE)
+  }
+  html <- httr2::resp_body_string(resp)
+  links <- sub('^href="', "", regmatches(html, gregexpr('href="[^"?#]+', html))[[1]])
+  links <- ifelse(grepl("^https?://", links), links,
+                  ifelse(startsWith(links, "/"), paste0(sub("^(https?://[^/]+).*", "\\1", folder), links), paste0(folder, links)))
+  links <- unique(links[startsWith(links, folder) & links != folder])
+  if (any(basename(links) == file)) return(links[basename(links) == file][1])
+  for (sub_folder in if (depth > 0) links[endsWith(links, "/")]) {
+    url <- nsidc_file_url(sub_folder, file, netrc, depth - 1)
+    if (!is.na(url)) return(url)
+  }
+  NA_character_
+}
+
 #' Glacier cover from the Randolph Glacier Inventory
 #'
 #' Percent of each catchment covered by glacier outlines from an RGI regional
 #' file. The RGI 7.0 glacier product (NSIDC-0770, doi:10.5067/F6JMOVY5NAVZ;
 #' region 01 Alaska, outlines for about 2000) is distributed by NSIDC behind
-#' an Earthdata login, so download it by hand and unzip it into the cache's
-#' `rgi` folder (or pass `path`). Earlier versions (RGI 6.0) work the same way.
+#' a free Earthdata login. With your Earthdata Login in a `.netrc` file, as
+#' NSIDC's programmatic access guide sets out, it is downloaded once into the
+#' cache's `rgi` folder; without one, download `RGI2000-v7.0-G-01_alaska.zip`
+#' by hand and unzip it there (or pass `path`). `vignette("data-sources")`
+#' explains both.
+#' Earlier versions (RGI 6.0) work the same way.
 #'
 #' Uncertainty: outline placement is shifted at random with SD `sigma_m`
 #' (default 30 m, about one Landsat pixel) to give `glacier_pct_se`, `_lo95`
@@ -246,8 +299,7 @@ extract_7z <- function(arc, exdir) {
 #' @export
 ak_glaciers <- function(catchments, path = ak_cache_dir(cache_paths$glaciers), sigma_m = 30, n = 500, seed = 1) {
   x <- as_catchments(catchments)
-  shp <- if (dir.exists(path)) list.files(path, "\\.shp$", recursive = TRUE, full.names = TRUE)[1] else path
-  if (is.na(shp)) stop("No RGI shapefile in ", path, ": download the RGI 7.0 region 01 glacier product from NSIDC (NSIDC-0770)")
+  shp <- if (dir.exists(path)) glacier_shapefile(path) else path
   g <- sf::st_read(shp, wkt_filter = bbox_wkt(sf::st_buffer(sf::st_union(sf::st_geometry(x)), 4 * sigma_m + 1), shp), quiet = TRUE) |>
     sf::st_make_valid() |>
     sf::st_transform(akalbers_crs()) |>

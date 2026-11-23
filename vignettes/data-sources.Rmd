@@ -1,0 +1,187 @@
+---
+title: "Data sources: citing them, their terms of use, and downloads that need an account"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Data sources: citing them, their terms of use, and downloads that need an account}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+```
+
+Every value the package adds comes from someone else's data set. This
+vignette covers what you owe the providers when you publish or share
+results (references, acknowledgements, terms of use), the one download
+that needs an account (the RGI glaciers, with a free Earthdata Login), and
+the others that need anything at all. The tables below are made
+from the package's own catalogue when the vignette is built, so they match
+what `ak_layers()` and `ak_citations()` return.
+
+## 1. Citing the layers you used
+
+`ak_citations()` reads a catchment object's provenance record (which
+layers were added, and when) and returns the references for each, the
+provider's terms in short, and any acknowledgement text the provider asks
+for; with `bibtex` it also writes a BibTeX file for a reference manager.
+
+```{r cite-x, eval = FALSE}
+refs <- ak_citations(x, bibtex = "catchments.bib")
+unique(refs$reference)                                       # the reference list
+unique(refs$acknowledgement[nzchar(refs$acknowledgement)])   # text for the acknowledgements
+```
+
+Long tables (daily weather, snow-off, projections, NDVI) carry their own
+provenance: pass the table as `x`, or name the layers. Without `x`, name
+the layers as `"layer"` (the default variant) or `"layer/variant"`:
+
+```{r cite-layers}
+refs <- ak_citations(layers = c("permafrost", "glaciers"))
+refs[, c("layer", "key", "doi")]
+cat(unique(refs$reference), sep = "\n\n")
+```
+
+AKCatchments itself is always the first row. A few things to check by
+hand:
+
+- **Access dates.** References to live services (StreamStats, Soil Data
+  Access, the fire perimeters, SNAP, AKTEMP, PRISM, the USGS water data
+  APIs) carry the date the layer was added to `x`, or today's date for
+  layers named in `layers`. Several providers (PRISM, NRCS, USGS
+  StreamStats) ask for it.
+- **Which flowline source.** The `flowlines` layer lists every source the
+  package can use (3DHP, NHD, TDX-Hydro, GEOGLOWS, MERIT-Basins,
+  HydroRIVERS); keep the one you used (`snap_reference` in
+  `ak_delineate()`, or `source` in `ak_flowlines()`).
+- **AKTEMP providers.** Stream temperatures are credited to each data
+  provider: replace `[providers]` with the organisations whose series you
+  used (in the `ak_obs_temperature()` output).
+- **The catchments' DEM.** Terrain attributes are cited through the
+  catchment layer (the DEM they were delineated on) plus WhiteboxTools.
+
+## 2. Downloads
+
+Every layer downloads on first use into the cache (`ak_cache_dir()`) and is
+read from there afterwards; `ak_prefetch(x, layers)` fetches them up front.
+Only the RGI glaciers need an account.
+
+| layer | needs | notes |
+|---|---|---|
+| Glaciers (RGI 7.0, NSIDC) | a free Earthdata Login, in a `.netrc` file | section 2.1; or download by hand (2.2) |
+| Permafrost, ground ice (Jorgenson et al. 2008) | nothing | 13 MB zip from the North Slope Science Catalog |
+| Permafrost probability (Pastick et al. 2015) | the archive package or 7-Zip | 777 MB 7-Zip archive from ScienceBase |
+| USGS daily values | nothing; an API key (`API_USGS_PAT`) raises the hourly limit | `vignette("observations")` |
+| Everything else | nothing | |
+
+### 2.1 Glaciers with your Earthdata Login
+
+NSIDC distributes the Randolph Glacier Inventory behind NASA's Earthdata
+Login, from its HTTPS file system (`daacdata.apps.nsidc.org`). The package
+downloads the Alaska file (`RGI2000-v7.0-G-01_alaska.zip`) the way NSIDC's
+[programmatic access guide](https://nsidc.org/data/user-resources/help-center/programmatic-access-guide-data-daacdataapps)
+does it with curl: your Earthdata Login username and password from a
+`.netrc` file, and a session cookie. That guide documents the username and
+password for this server, not Earthdata Login tokens, so the package
+doesn't use a token. Once the file is in the cache, the login isn't needed
+again.
+
+1. **Make an account.** Register (free) at
+   <https://urs.earthdata.nasa.gov>.
+2. **Put the login in a netrc file**, as step 1 of NSIDC's guide says: a
+   file named `.netrc` in your home folder (on Windows, `_netrc` in
+   `C:\Users\<you>`), with this line:
+
+    ```
+    machine urs.earthdata.nasa.gov login <username> password <password>
+    ```
+
+    Open the file in an editor (typing the password into the R console
+    would keep it in your history):
+
+    ```{r netrc, eval = FALSE}
+    netrc <- if (.Platform$OS.type == "windows") file.path(Sys.getenv("USERPROFILE"), "_netrc") else "~/.netrc"
+    file.edit(netrc)               # add the line above and save
+    Sys.chmod(netrc, "600")        # Mac and Linux: readable by you only
+    ```
+
+    The password is stored as plain text, as NSIDC's method requires, so
+    keep the file in your home folder, out of project folders and anything
+    you share or sync to a repository. If you already have a netrc file with
+    an `urs.earthdata.nasa.gov` line (from other NASA download tools),
+    there is nothing to do.
+3. **Download.** The first glacier call downloads and unzips the file into
+   the cache's `rgi/` folder:
+
+    ```{r rgi, eval = FALSE}
+    ak_prefetch(x, layers = "glaciers")   # status "ok" and the shapefile's path
+    x <- ak_glaciers(x)
+    ```
+
+Without the netrc line, `ak_glaciers()` stops and `ak_prefetch()` reports
+`manual`, with these instructions. If NSIDC answers with the Earthdata login
+page, the username or password in the file is wrong. For other problems,
+NSIDC User Services (nsidc@nsidc.org) answers questions on programmatic
+access.
+
+### 2.2 Glaciers by hand
+
+Without a netrc file: download `RGI2000-v7.0-G-01_alaska.zip` from
+<https://nsidc.org/data/nsidc-0770> (*Data Access & Tools*, signed in to
+Earthdata Login), and unzip it into the folder given by
+`ak_cache_dir("rgi")`, or keep it elsewhere and pass `path` to
+`ak_glaciers()`. RGI 6.0 region 01 works the same way.
+
+### 2.3 Jorgenson et al. (2008) permafrost map
+
+The shapefile is downloaded from the North Slope Science Catalog
+(dataset 1725) into `ak_cache_dir("jorgenson_2008")`. If the catalog's link
+changes, the download fails with a message: download the zip from
+<https://catalog.northslopescience.org/dataset/1725>, unzip it into that
+folder, or pass `path` to `ak_permafrost()`.
+
+## 3. Terms of use
+
+Most of the data are US federal works in the public domain, with credit
+requested. The others set conditions:
+
+- **Attribution text.** PRISM and the Copernicus DEM require a set
+  notice, GEOGLOWS and SNAP/CMIP6 ask for one, and USGS, DGGS and the BLM
+  ask for credit; the text is in the `acknowledgement` column of
+  `ak_citations()`.
+- **Citing in a set form, and telling the provider.** NSIDC (glaciers)
+  asks for the data set citation in the text and the reference list, and
+  that publications using the data be reported to NSIDC User Services
+  ([data use policy](https://nsidc.org/about/data-use-and-copyright)).
+  Daymet asks for every product and tool used to be cited: the data set,
+  the Single Pixel Extraction Tool and the method paper.
+- **Creative Commons licences.** The ACCS alder maps, the RGI and GEOGLOWS
+  are CC BY 4.0 (share and adapt with attribution); TDX-Hydro is CC BY-SA
+  4.0 (data derived from it, if shared, must carry the same licence);
+  MERIT-Basins is CC BY-NC-SA 4.0 (no commercial use).
+- **No licence stated.** The Jorgenson et al. (2008) map and the NPS
+  Wrangell-St. Elias land cover state no licence: cite them, and ask the
+  authors (or NPS) before redistributing the maps themselves.
+- **Redistributing derived tables.** Confirm with PRISM and SNAP before
+  publishing tables derived from their grids as a data set of their own
+  (the `redistributable` column of `ak_layers()`).
+
+These are summaries; the provider's page (the `terms_url` column) is the
+authority.
+
+```{r terms, echo = FALSE}
+d <- ak_layers(details = TRUE)
+d$terms_url <- gsub("(https?://[^; ]+)", "<\\1>", d$terms_url)
+knitr::kable(d[, c("layer", "variant", "licence", "terms", "terms_url", "redistributable")],
+             col.names = c("layer", "variant", "licence", "terms", "terms page", "redistributable"))
+```
+
+## 4. Every layer's references
+
+```{r all-refs, echo = FALSE}
+refs <- ak_citations()
+refs <- refs[!duplicated(paste(refs$layer, refs$variant, refs$key)), ]
+knitr::kable(data.frame(layer = paste0(refs$layer, ifelse(nzchar(refs$variant), paste0(" (", refs$variant, ")"), "")),
+                        reference = refs$reference))
+```

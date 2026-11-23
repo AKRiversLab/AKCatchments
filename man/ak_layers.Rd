@@ -36,9 +36,10 @@ provenance; summarise it to one row per site and add it with
 
 With \code{details = TRUE} the table also has, for every row, the citation, the
 URL, the native resolution or scale, the error the producer publishes, the
-uncertainty columns the package adds and how it computes them, and the
-assumptions behind them: the metadata table for a data release built with
-the package. Each layer's vignette (\code{vignette(package = "AKCatchments")})
+uncertainty columns the package adds and how it computes them, the
+assumptions behind them, and the provider's terms of use and requested
+acknowledgement: the metadata table for a data release built with the
+package. \code{\link[=ak_citations]{ak_citations()}} gives the full references. Each layer's vignette (\code{vignette(package = "AKCatchments")})
 explains these in full.
 }
 \examples{

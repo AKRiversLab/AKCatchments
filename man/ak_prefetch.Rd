@@ -24,10 +24,11 @@ A data frame: \code{layer}, \code{variant}, \code{status} (\code{ok}, \code{manu
 }
 \description{
 Fetches, once, everything the given layers need for the catchments: the
-statewide files (geology, land cover, alder, Pastick permafrost, PRISM),
-the fire perimeters for the catchments' area, Daymet pixels and MODIS
-years (with \code{years}), and global flowline files. Run it before a long
-extraction, before working offline, or to fill a shared cache. Layers
-that need a manual download are checked and explained. A failure is
+statewide files (geology, land cover, alder, both permafrost maps,
+glaciers, PRISM), the fire perimeters for the catchments' area, Daymet
+pixels and MODIS years (with \code{years}), and global flowline files. Run it
+before a long extraction, before working offline, or to fill a shared
+cache. A layer that needs a manual download (RGI glaciers without an
+Earthdata Login in a \code{.netrc} file) is checked and explained. A failure is
 recorded and the next layer is tried.
 }

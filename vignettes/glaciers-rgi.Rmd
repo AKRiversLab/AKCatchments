@@ -25,13 +25,18 @@ are. The other layers are listed in `vignette("delineation")`, section 7.
 
 ## 1. Getting the data
 
-**Manual download** (NSIDC requires an Earthdata login): download RGI 7.0
-region 01 and unzip it into the cache's `rgi/` folder, or pass `path`.
-RGI 6.0 files work the same way.
+NSIDC serves RGI 7.0 behind a free Earthdata login. **With your Earthdata
+Login in a `.netrc` file**, as NSIDC's programmatic access guide sets out
+(`vignette("data-sources")`, section 2.1), the region 01 glacier product is
+downloaded into the cache's `rgi/` folder the first time it is needed.
+**Without one**, download `RGI2000-v7.0-G-01_alaska.zip` from
+<https://nsidc.org/data/nsidc-0770> and unzip it into that folder (or pass
+`path`). RGI 6.0 files work the same way. Citation and terms:
+`ak_citations(layers = "glaciers")`.
 
-```{r manual, eval = FALSE}
-ak_cache_dir("rgi")
-ak_prefetch(x, layers = "glaciers/rgi7")   # says whether it is found
+```{r download, eval = FALSE}
+ak_prefetch(x, layers = "glaciers/rgi7")   # downloads it now, or says what is missing
+ak_cache_dir("rgi")                        # where the files go
 ```
 
 ## 2. Using it

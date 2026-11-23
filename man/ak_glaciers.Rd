@@ -31,8 +31,12 @@ ak_glaciers(
 Percent of each catchment covered by glacier outlines from an RGI regional
 file. The RGI 7.0 glacier product (NSIDC-0770, doi:10.5067/F6JMOVY5NAVZ;
 region 01 Alaska, outlines for about 2000) is distributed by NSIDC behind
-an Earthdata login, so download it by hand and unzip it into the cache's
-\code{rgi} folder (or pass \code{path}). Earlier versions (RGI 6.0) work the same way.
+a free Earthdata login. With your Earthdata Login in a \code{.netrc} file, as
+NSIDC's programmatic access guide sets out, it is downloaded once into the
+cache's \code{rgi} folder; without one, download \verb{RGI2000-v7.0-G-01_alaska.zip}
+by hand and unzip it there (or pass \code{path}). \code{vignette("data-sources")}
+explains both.
+Earlier versions (RGI 6.0) work the same way.
 }
 \details{
 Uncertainty: outline placement is shifted at random with SD \code{sigma_m}

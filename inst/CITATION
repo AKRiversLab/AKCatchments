@@ -1,0 +1,5 @@
+bibentry("Manual",
+         title = "AKCatchments: Delineate and Characterize Alaska Stream Catchments with Documented Uncertainty",
+         author = person("Caleb", "Robbins"),
+         year = "2026",
+         note = paste("R package version", meta$Version))

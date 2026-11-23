@@ -18,9 +18,10 @@
 #'
 #' With `details = TRUE` the table also has, for every row, the citation, the
 #' URL, the native resolution or scale, the error the producer publishes, the
-#' uncertainty columns the package adds and how it computes them, and the
-#' assumptions behind them: the metadata table for a data release built with
-#' the package. Each layer's vignette (`vignette(package = "AKCatchments")`)
+#' uncertainty columns the package adds and how it computes them, the
+#' assumptions behind them, and the provider's terms of use and requested
+#' acknowledgement: the metadata table for a data release built with the
+#' package. [ak_citations()] gives the full references. Each layer's vignette (`vignette(package = "AKCatchments")`)
 #' explains these in full.
 #'
 #' @param layer Optional layer name(s) to keep.
@@ -39,7 +40,8 @@ ak_layers <- function(layer = NULL, details = FALSE) {
   if (details) {
     out <- cbind(out, data.frame(citation = s$citation, url = s$url, published_error = s$published_error,
                                  uncertainty_columns = s$uncertainty_columns, uncertainty_method = s$uncertainty_method,
-                                 assumptions = s$assumptions, stringsAsFactors = FALSE))
+                                 assumptions = s$assumptions, terms = s$terms, terms_url = s$terms_url,
+                                 acknowledgement = s$acknowledgement, stringsAsFactors = FALSE))
   }
   if (!is.null(layer)) {
     bad <- setdiff(layer, out$layer)
@@ -51,7 +53,7 @@ ak_layers <- function(layer = NULL, details = FALSE) {
 }
 
 sources_table <- function() {
-  utils::read.csv(system.file("extdata", "sources.csv", package = "AKCatchments"), stringsAsFactors = FALSE)
+  utils::read.csv(system.file("extdata", "sources.csv", package = "AKCatchments"), stringsAsFactors = FALSE, encoding = "UTF-8")
 }
 
 # The catalog row for a layer and variant (the default variant if NULL)
@@ -125,11 +127,12 @@ deparse_args <- function(a) {
 #' Download a set of layers before extracting them
 #'
 #' Fetches, once, everything the given layers need for the catchments: the
-#' statewide files (geology, land cover, alder, Pastick permafrost, PRISM),
-#' the fire perimeters for the catchments' area, Daymet pixels and MODIS
-#' years (with `years`), and global flowline files. Run it before a long
-#' extraction, before working offline, or to fill a shared cache. Layers
-#' that need a manual download are checked and explained. A failure is
+#' statewide files (geology, land cover, alder, both permafrost maps,
+#' glaciers, PRISM), the fire perimeters for the catchments' area, Daymet
+#' pixels and MODIS years (with `years`), and global flowline files. Run it
+#' before a long extraction, before working offline, or to fill a shared
+#' cache. A layer that needs a manual download (RGI glaciers without an
+#' Earthdata Login in a `.netrc` file) is checked and explained. A failure is
 #' recorded and the next layer is tried.
 #'
 #' @param x Catchments (sf polygons with `site_code`).
@@ -161,10 +164,6 @@ ak_prefetch <- function(x, layers = NULL, years = NULL, flowlines = NULL) {
 }
 
 prefetch_one <- function(layer, variant, x, years) {
-  manual <- \(folder, what) {
-    have <- length(list.files(ak_cache_dir(folder), "\\.shp$", recursive = TRUE)) > 0
-    if (have) c("ok", paste("found in", ak_cache_dir(folder))) else c("manual", paste0(what, "; put it in ", ak_cache_dir(folder)))
-  }
   switch(paste(layer, variant, sep = "/"),
     "alder/accs2021" = { alder_raster(); c("ok", ak_cache_dir(cache_paths$alder)) },
     "alder/nps_wrst" = { wrst_grid(); c("ok", ak_cache_dir(cache_paths$nps_wrst)) },
@@ -181,9 +180,9 @@ prefetch_one <- function(layer, variant, x, years) {
       c("ok", paste(nrow(g), "grids in", ak_cache_dir(cache_paths$prism)))
     },
     "fire/afs_perimeters" = c("ok", paste(nrow(fire_perimeters(as_catchments(x))), "perimeters")),
-    "permafrost/jorgenson2008" = , "ground_ice/jorgenson2008" =
-      manual(cache_paths$jorgenson, "download the shapefile from https://catalog.northslopescience.org/dataset/1725"),
-    "glaciers/rgi7" = manual(cache_paths$glaciers, "download RGI 7.0 region 01 (NSIDC-0770, Earthdata login)"),
+    "permafrost/jorgenson2008" = , "ground_ice/jorgenson2008" = c("ok", jorgenson_shapefile(ak_cache_dir(cache_paths$jorgenson))),
+    "glaciers/rgi7" = tryCatch(c("ok", glacier_shapefile(ak_cache_dir(cache_paths$glaciers))),
+                               ak_manual_download = \(e) c("manual", conditionMessage(e))),
     "soils/statsgo2" = c("not needed", "queried from Soil Data Access by ak_soils()"),
     "topography/delineation_dem" = , "outlet_slope/delineation_dem" = c("not needed", "uses the delineation DEM"),
     "weather_daily/daymet4" = {

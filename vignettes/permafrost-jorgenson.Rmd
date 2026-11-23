@@ -27,13 +27,13 @@ are. The other layers are listed in `vignette("delineation")`, section 7.
 
 ## 1. Getting the data
 
-**Manual download.** The shapefile is in the North Slope Science Catalog
-(dataset 1725) and can't be fetched by script. Download it, unzip it into
-the cache's `jorgenson_2008/` folder (or pass `path`):
+**Downloaded once.** The shapefile (13 MB, North Slope Science Catalog
+dataset 1725) is downloaded into the cache's `jorgenson_2008/` folder the
+first time it is needed; or pass `path` to a copy of your own. Citation and
+terms: `ak_citations(layers = "permafrost")` and `vignette("data-sources")`.
 
-```{r manual, eval = FALSE}
-ak_cache_dir("jorgenson_2008")                        # where to put it
-ak_prefetch(x, layers = "permafrost/jorgenson2008")   # says whether it is found
+```{r download, eval = FALSE}
+ak_prefetch(x, layers = "permafrost/jorgenson2008")   # downloads it now
 ```
 
 The 2008 shapefile codes extent as letters in `PF_EXTENT` (C, D, S, I,

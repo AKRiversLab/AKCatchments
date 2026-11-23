@@ -23,8 +23,8 @@ ak_permafrost(
 \item{source}{\code{"jorgenson2008"} or \code{"pastick2015"}.}
 
 \item{path}{For \code{jorgenson2008}: the unzipped shapefile, or a folder
-containing it (default: the cache's \code{jorgenson_2008} folder, where the
-geo workflow kept it).}
+containing it (default: the cache's \code{jorgenson_2008} folder, where it is
+downloaded if it isn't there yet).}
 
 \item{sigma_m}{For \code{jorgenson2008}: positional error SD of the map,
 metres; 0 keeps only the class-range uncertainty.}
@@ -53,8 +53,7 @@ Adds permafrost columns from one of two maps:
 \item \code{source = "jorgenson2008"} (default): Permafrost Characteristics of
 Alaska (Jorgenson et al. 2008), extent and ground-ice class shares and
 total permafrost with its uncertainty (columns \verb{jorg_pct_*},
-\verb{groundice_pct_*}, \verb{totperm_pct*}). The shapefile must be downloaded by
-hand.
+\verb{groundice_pct_*}, \verb{totperm_pct*}). The shapefile is downloaded once.
 \item \code{source = "pastick2015"}: 30 m probability of near-surface permafrost
 (Pastick et al. 2015), downloaded once (columns \verb{pf_*}).
 }
@@ -69,9 +68,9 @@ can be added.
 Permafrost extent classes and total permafrost with uncertainty.
 
 Reads the Permafrost Characteristics of Alaska map (Jorgenson et al. 2008;
-shapefile from the North Slope Science Catalog, dataset 1725, which must be
-downloaded by hand) and adds, per catchment, the share of each extent
-class and an estimate of total permafrost cover.
+shapefile from the North Slope Science Catalog, dataset 1725, downloaded
+once, 13 MB) and adds, per catchment, the share of each extent class and an
+estimate of total permafrost cover.
 
 Total permafrost combines two uncertainties by simulation: the true
 permafrost fraction within each class is unknown within the class range

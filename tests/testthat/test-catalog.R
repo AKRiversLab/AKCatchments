@@ -114,14 +114,66 @@ test_that("regional windows give the same catchments as per-site windows, and sh
   expect_equal(names(g), c("A+1", "C"))
 })
 
-test_that("prefetch reports manual and not-needed layers without failing", {
+test_that("prefetch downloads the Jorgenson map, explains the glaciers without a login, and skips what needs nothing", {
   old <- options(AKCatchments.cache = tempfile("akcache_"))
   on.exit(options(old), add = TRUE)
+  local_mocked_bindings(earthdata_netrc = function() NA_character_, ak_download = function(url, dest, query = list(), netrc = NULL) {
+    expect_match(url, "^https://catalog\\.northslopescience\\.org/.*\\.zip$")
+    dir.create(dirname(dest), recursive = TRUE, showWarnings = FALSE)
+    file.copy(test_path("fixtures", "jorgenson2008.zip"), dest)
+    dest
+  })
   sq <- sf::st_polygon(list(cbind(c(0, 1000, 1000, 0, 0), c(0, 0, 1000, 1000, 0))))
   x <- sf::st_sf(site_code = "A", geometry = sf::st_sfc(sq, crs = 3338))
   p <- ak_prefetch(x, c("permafrost", "glaciers", "soils", "topography", "weather_daily"))
-  expect_equal(p$status, c("manual", "manual", "not needed", "not needed", "failed"))
-  expect_match(p$detail[1], "northslopescience")
+  expect_equal(p$status, c("ok", "manual", "not needed", "not needed", "failed"))
+  expect_match(p$detail[1], "PermafrostCharacteristics\\.shp$")
+  expect_match(p$detail[2], "machine urs.earthdata.nasa.gov login", fixed = TRUE)
+  expect_match(p$detail[2], "nsidc-0770")
+})
+
+test_that("the RGI glaciers are found on NSIDC's server and downloaded with the Earthdata Login in .netrc", {
+  dir <- tempfile("rgi_")
+  local_mocked_bindings(earthdata_netrc = function() NA_character_)
+  expect_error(AKCatchments:::glacier_shapefile(dir), class = "ak_manual_download")
+  netrc <- tempfile("netrc_")
+  base <- "https://daacdata.apps.nsidc.org/pub/DATASETS/nsidc0770_rgi_v7/"
+  pages <- list(
+    '<a href="?C=N;O=D">Name</a> <a href="/pub/DATASETS/">Parent</a> <a href="global_files/">g</a> <a href="regional_files/">r</a>',
+    '<a href="RGI2000-v7.0-G-global.zip">all regions</a>',
+    '<a href="RGI2000-v7.0-G/">G</a> <a href="RGI2000-v7.0-C/">C</a>',
+    '<a href="RGI2000-v7.0-G-01_alaska.zip">x</a> <a href="RGI2000-v7.0-G-02_western_canada_usa.zip">y</a>'
+  )
+  names(pages) <- paste0(base, c("", "global_files/", "regional_files/", "regional_files/RGI2000-v7.0-G/"))
+  login <- FALSE
+  local_mocked_bindings(
+    earthdata_netrc = function() netrc,
+    ak_perform = function(req) {
+      expect_equal(req$options$netrc_file, netrc)
+      httr2::response(200, url = if (login) "https://urs.earthdata.nasa.gov/oauth/authorize" else req$url,
+                      headers = list(`Content-Type` = "text/html"), body = charToRaw(pages[[req$url]] %||% ""))
+    },
+    ak_download = function(url, dest, query = list(), netrc = NULL) {
+      expect_equal(url, paste0(base, "regional_files/RGI2000-v7.0-G/RGI2000-v7.0-G-01_alaska.zip"))
+      expect_equal(netrc, !!netrc)
+      dir.create(dirname(dest), recursive = TRUE, showWarnings = FALSE)
+      file.copy(test_path("fixtures", "rgi7_alaska.zip"), dest)
+      dest
+    }
+  )
+  expect_equal(basename(AKCatchments:::glacier_shapefile(dir)), "RGI2000-v7.0-G-01_alaska.shp")
+  login <- TRUE
+  expect_error(AKCatchments:::glacier_shapefile(tempfile("rgi_")), "login page")
+})
+
+test_that("the Earthdata Login is found in .netrc or _netrc in the home folder", {
+  home <- withr::local_tempdir()
+  withr::local_envvar(HOME = home, USERPROFILE = "")
+  expect_true(is.na(AKCatchments:::earthdata_netrc()))
+  writeLines("machine example.org login a password b", file.path(home, ".netrc"))
+  expect_true(is.na(AKCatchments:::earthdata_netrc()))       # a netrc without Earthdata Login doesn't count
+  writeLines("machine urs.earthdata.nasa.gov login a password b", file.path(home, "_netrc"))
+  expect_equal(AKCatchments:::earthdata_netrc(), file.path(home, "_netrc"))
 })
 
 test_that("ak_fire appends static columns, or returns a table by year or for sample windows", {
@@ -180,4 +232,27 @@ test_that("layer functions take a delineation or a list of them, and keep the ca
   m2 <- catchment_mean(ll, r, "v")
   expect_equal(sf::st_crs(m2)$epsg, 4326)                  # CRS of the input kept
   expect_s3_class(catchment_sf(d1), "sf")
+})
+
+test_that("every layer's references build, and ak_citations follows the provenance record", {
+  refs <- ak_citations()
+  keys <- trimws(unlist(strsplit(AKCatchments:::sources_table()$references, ";")))
+  expect_setequal(unique(refs$key), c("akcatchments", keys))
+  expect_true(all(nzchar(refs$reference)))
+  expect_false(any(grepl("????", refs$reference, fixed = TRUE)))        # every entry has a year
+  expect_false(any(grepl("<date>", refs$acknowledgement, fixed = TRUE)))
+  sq <- sf::st_polygon(list(cbind(c(0, 1000, 1000, 0, 0), c(0, 0, 1000, 1000, 0))))
+  x <- sf::st_sf(site_code = "A", geometry = sf::st_sfc(sq, crs = 3338))
+  attr(x, "ak_provenance") <- dplyr::bind_rows(
+    AKCatchments:::provenance_row(AKCatchments:::layer_row("climate_normals", "prism8110")),
+    AKCatchments:::provenance_row(AKCatchments:::layer_row("glaciers"))
+  )
+  attr(x, "ak_provenance")$added_utc[1] <- "2026-03-02 10:00:00"
+  bib <- tempfile(fileext = ".bib")
+  r <- ak_citations(x, layers = "permafrost/pastick2015", bibtex = bib)
+  expect_equal(r$key, c("akcatchments", "prism_ak", "pastick2015data", "pastick2015", "rgi2023"))
+  expect_match(r$acknowledgement[2], "accessed 2026-03-02")
+  expect_match(r$reference[2], "Accessed 2026-03-02")
+  expect_equal(sum(startsWith(readLines(bib), "@")), 5)
+  expect_error(ak_citations(layers = "nope"), "Unknown layer")
 })

@@ -301,8 +301,7 @@ nlcd_classes <- c(`11` = "water", `12` = "icesnow", `21` = "dev_open", `22` = "d
 #' * `source = "jorgenson2008"` (default): Permafrost Characteristics of
 #'   Alaska (Jorgenson et al. 2008), extent and ground-ice class shares and
 #'   total permafrost with its uncertainty (columns `jorg_pct_*`,
-#'   `groundice_pct_*`, `totperm_pct*`). The shapefile must be downloaded by
-#'   hand.
+#'   `groundice_pct_*`, `totperm_pct*`). The shapefile is downloaded once.
 #' * `source = "pastick2015"`: 30 m probability of near-surface permafrost
 #'   (Pastick et al. 2015), downloaded once (columns `pf_*`).
 #'
@@ -314,9 +313,9 @@ nlcd_classes <- c(`11` = "water", `12` = "icesnow", `21` = "dev_open", `22` = "d
 #' Permafrost extent classes and total permafrost with uncertainty.
 #'
 #' Reads the Permafrost Characteristics of Alaska map (Jorgenson et al. 2008;
-#' shapefile from the North Slope Science Catalog, dataset 1725, which must be
-#' downloaded by hand) and adds, per catchment, the share of each extent
-#' class and an estimate of total permafrost cover.
+#' shapefile from the North Slope Science Catalog, dataset 1725, downloaded
+#' once, 13 MB) and adds, per catchment, the share of each extent class and an
+#' estimate of total permafrost cover.
 #'
 #' Total permafrost combines two uncertainties by simulation: the true
 #' permafrost fraction within each class is unknown within the class range
@@ -361,8 +360,8 @@ nlcd_classes <- c(`11` = "water", `12` = "icesnow", `21` = "dev_open", `22` = "d
 #'   `ak_delineation`, or a list of them.
 #' @param source `"jorgenson2008"` or `"pastick2015"`.
 #' @param path For `jorgenson2008`: the unzipped shapefile, or a folder
-#'   containing it (default: the cache's `jorgenson_2008` folder, where the
-#'   geo workflow kept it).
+#'   containing it (default: the cache's `jorgenson_2008` folder, where it is
+#'   downloaded if it isn't there yet).
 #' @param sigma_m For `jorgenson2008`: positional error SD of the map,
 #'   metres; 0 keeps only the class-range uncertainty.
 #' @param n Number of draws.
@@ -396,9 +395,22 @@ ak_permafrost <- function(catchments, source = c("jorgenson2008", "pastick2015")
   add_columns(catchments, new, layer_row("permafrost", source, fn = "ak_permafrost"), args)
 }
 
+# The Jorgenson et al. (2008) shapefile in `dir`, downloaded once from the North Slope Science Catalog (dataset 1725)
+jorgenson_shapefile <- function(dir) {
+  shp <- list.files(dir, "\\.shp$", recursive = TRUE, full.names = TRUE)[1]
+  if (!is.na(shp)) return(shp)
+  zip <- ak_download(paste0("https://catalog.northslopescience.org/dataset/6803a021-6f72-4aa5-95f6-bc5facd534e8/resource/",
+                            "5811669f-860c-450e-9bc0-9dfc21821606/download/233-permafrost-characteristics-of-alaska-2008-sha.zip"),
+                     file.path(dir, "permafrost-characteristics-of-alaska-2008.zip"))
+  utils::unzip(zip, exdir = dir)
+  shp <- list.files(dir, "\\.shp$", recursive = TRUE, full.names = TRUE)[1]
+  if (is.na(shp)) stop("The Jorgenson et al. (2008) download held no shapefile (", zip, "); download it from ",
+                       "https://catalog.northslopescience.org/dataset/1725 and unzip it into ", dir, call. = FALSE)
+  shp
+}
+
 permafrost_jorgenson <- function(x, path, sigma_m = 1000, n = 500, ext_field = NULL, ice_field = NULL, seed = 1) {
-  shp <- if (dir.exists(path)) list.files(path, "\\.shp$", recursive = TRUE, full.names = TRUE)[1] else path
-  if (is.na(shp)) stop("No shapefile in ", path, ": download it from https://catalog.northslopescience.org/dataset/1725")
+  shp <- if (dir.exists(path)) jorgenson_shapefile(path) else path
   m <- sf::st_read(shp, quiet = TRUE)
   if (is.na(sf::st_crs(m))) sf::st_crs(m) <- akalbers_crs()
   fields <- sf::st_drop_geometry(m)

@@ -426,6 +426,31 @@ the old function and must move to `compare_catchments()`.
 - Next for the package: as in 4h (failure probability, consensus default), plus whatever the paper's pilot
   turns up against the real services.
 
+## 4j. Citations and the two manual downloads (2026-11-19)
+
+- `ak_citations()` (R/citations.R): provenance record and/or `layers` -> one row per layer and reference, with
+  terms and acknowledgement; `bibtex =` writes unique entries. References live in inst/extdata/references.csv
+  (authors as "Family, Given; ..." with {corporate names}; blank year + accessed = "yes" for live services,
+  cited with the date the layer was added). sources.csv has `references` (keys), `terms`, `terms_url`,
+  `acknowledgement`. New vignette data-sources.Rmd builds its tables from these, so keep them current there.
+- Checked against the providers' pages (2026-11-19): NSIDC data use, Daymet citations, PRISM terms, StreamStats
+  citation, NLCD Alaska, IfSAR, snow metrics authors, alder authors, TDX-Hydro, HydroRIVERS licence. Not checked:
+  the Copernicus DEM year (kept 2024 from the old citation), SNAP's terms page, the full GEOGLOWS author list
+  (cited "Hales and others"), dataRetrieval's year.
+- Jorgenson: `jorgenson_shapefile()` downloads the North Slope Science Catalog zip (URL from Caleb, 2026-11-19).
+- RGI: `glacier_shapefile()` finds the user's netrc file with an urs.earthdata.nasa.gov line (`earthdata_netrc()`:
+  ~/.netrc or _netrc, also in USERPROFILE), finds RGI2000-v7.0-G-01_alaska.zip by crawling NSIDC's HTTPS listing
+  under nsidc0770_rgi_v7/ (3 levels; the exact path wasn't known), and downloads with curl's netrc options, Basic
+  auth sent without a challenge (`httpauth = 1`; R's curl otherwise waits for one and Earthdata Login redirects to its
+  sign-in page instead) and a cookie jar: NSIDC's documented `curl -b -c -L -n`. A first version used an Earthdata
+  bearer token; Caleb pointed out NSIDC's guide for daacdata.apps documents only username/password, so it was
+  replaced the same day. No netrc: error of class `ak_manual_download`, which `ak_prefetch()` reports as `manual`.
+  A redirect to the login page is reported as a wrong username or password.
+- Checked offline against a local imitation of the Earthdata Login flow (data host -> login host with Basic auth ->
+  callback sets cookie -> data): works with the right password, ends at the login page with a wrong one.
+- **Not yet tried against the real servers** (the sandbox can't reach them): run `ak_prefetch(x, "glaciers")`
+  with a netrc file, and `ak_prefetch(x, "permafrost")`, and add live tests once they work.
+
 ## 5. Still open from the error audit
 
 The Selkowitz & Stehman NLCD 2001 Alaska confusion matrix (for

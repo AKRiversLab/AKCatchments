@@ -38,6 +38,29 @@ New: `catchment_join()` puts a one-row-per-site table (with its
 provenance) on the catchments; `ak_write(x, file, ...)` writes named tables
 too, with their provenance in the one provenance layer.
 
+## Citing the data, and fewer manual downloads
+
+* `ak_citations(x)` returns the references for every layer recorded in
+  `x`'s provenance (or named in `layers`), with each provider's terms of
+  use and the acknowledgement text some ask for, and writes them to a
+  BibTeX file with `bibtex =`. References to live services carry the date
+  the layer was added. The references are in `inst/extdata/references.csv`;
+  `sources.csv` gains `references`, `terms`, `terms_url` and
+  `acknowledgement`, and `ak_layers(details = TRUE)` shows the last three.
+  `citation("AKCatchments")` now has a CITATION file.
+* New `vignette("data-sources")`: how to cite, what each provider asks,
+  and the downloads that need anything.
+* The Jorgenson et al. (2008) permafrost map is downloaded once from the
+  North Slope Science Catalog instead of by hand.
+* The RGI 7.0 glaciers are downloaded once from NSIDC with the Earthdata
+  Login in your `.netrc` file, the method in NSIDC's programmatic access
+  guide (`ak_download(netrc = )` sends it to the login server and keeps the
+  session cookie, as `curl -n -L -b -c` does). Without it, `ak_glaciers()`
+  stops and `ak_prefetch()` reports `manual`, each saying how to set it up
+  or download the file by hand.
+* Daymet is cited as Version 4 R1 (doi:10.3334/ORNLDAAC/2129, the version
+  the Single Pixel Extraction Tool serves) plus the tool itself.
+
 ## Lidar where it exists
 
 * `ak_dem()`, and so `ak_delineate()`, `ak_catchments()` and

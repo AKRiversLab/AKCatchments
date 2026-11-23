@@ -89,9 +89,9 @@ ak_set_cache <- function(path, persist = c("session", "project", "user")) {
 ak_cache_layout <- function() {
   data.frame(
     dataset = c("Daymet pixels", "MODIS snow metrics (cropped)", "SIM 3340 geology", "ACCS alder", "NLCD 2016 Alaska",
-                "Jorgenson permafrost (manual download)", "Pastick permafrost", "Fire perimeters", "DEM tiles (local)",
+                "Jorgenson permafrost", "Pastick permafrost", "Fire perimeters", "DEM tiles (local)",
                 "DEM windows (IfSAR, Copernicus, elevatr)", "Delineations", "PRISM Alaska normals", "Reference flowlines",
-                "Imagery tiles", "Gaged basins", "Glaciers (manual download)", "NPS WRST land cover (alder alternate)",
+                "Imagery tiles", "Gaged basins", "Glaciers (RGI; Earthdata Login .netrc or manual download)", "NPS WRST land cover (alder alternate)",
                 "SNAP downscaled CMIP6 (monthly cell means)", "Landsat readings at sample points",
                 "Olson & Hawkins lithology geochemistry workbooks"),
     folder = c(cache_paths$daymet, cache_paths$modis, cache_paths$geology, cache_paths$alder, cache_paths$nlcd,
@@ -123,13 +123,18 @@ ak_cache_info <- function() {
        downloads = if (file.exists(man)) utils::read.csv(man) else data.frame())
 }
 
-ak_request <- function(url, query = list()) {
-  httr2::request(url) |>
+ak_request <- function(url, query = list(), netrc = NULL) {
+  req <- httr2::request(url) |>
     httr2::req_url_query(!!!query) |>
     httr2::req_user_agent("AKCatchments R package") |>
     httr2::req_retry(max_tries = 4, is_transient = \(resp) httr2::resp_status(resp) %in% c(429, 500, 502, 503, 504)) |>
     httr2::req_timeout(600) |>
     httr2::req_error(body = \(resp) c(paste("URL:", resp$url), resp_excerpt(resp)))
+  # Earthdata Login as in NSIDC's curl example (curl -b/-c cookies -L -n): credentials from the netrc file for the
+  # redirect to urs.earthdata.nasa.gov, sent as Basic auth without waiting for a challenge (R's curl otherwise waits,
+  # and the login server redirects to its sign-in page instead of challenging), and the session cookie kept
+  if (is.null(netrc)) req else httr2::req_options(req, netrc = 1L, netrc_file = netrc, httpauth = 1L) |>
+    httr2::req_cookie_preserve(file.path(tempdir(), "earthdata_cookies.txt"))
 }
 
 # HTTP errors name the URL (req_error above); so do connection failures
@@ -149,12 +154,12 @@ ak_json <- function(url, query = list(), simplify = TRUE) {
     jsonlite::fromJSON(simplifyVector = simplify)
 }
 
-ak_download <- function(url, dest, query = list()) {
+ak_download <- function(url, dest, query = list(), netrc = NULL) {
   if (file.exists(dest)) return(dest)
   dir.create(dirname(dest), recursive = TRUE, showWarnings = FALSE)
   tmp <- sprintf("%s.%s.part", dest, Sys.getpid())  # per process, so parallel workers don't collide
   # No limit on total time (the alder and Pastick archives are 5-6 GB); give up only if it stalls for 2 minutes
-  tryCatch(ak_request(url, query) |>
+  tryCatch(ak_request(url, query, netrc) |>
              httr2::req_options(timeout_ms = 0, connecttimeout = 60, low_speed_limit = 1000, low_speed_time = 120) |>
              ak_perform(path = tmp),
            error = \(e) { unlink(tmp); stop(e) })

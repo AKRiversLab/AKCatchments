@@ -17,7 +17,8 @@ catchments. What it returns depends on the dataset (the `returns` column of
 `ak_layers()` lists the layers and their sources (`source` argument);
 `ak_layers(details = TRUE)` adds citations, published accuracy and how the
 uncertainty columns are computed. `ak_provenance(x)` shows where every
-column on `x` came from.
+column on `x` came from, and `ak_citations(x)` gives the references, terms
+of use and acknowledgements for those layers (`vignette("data-sources")`).
 
 | theme | dataset | function (`source`) | returns | vignette |
 |---|---|---|---|---|

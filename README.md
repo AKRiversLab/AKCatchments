@@ -65,8 +65,10 @@ ak_write(x, "catchments.gpkg", weather = w, samples = ws)   # polygons + attribu
   as hand-drawn catchments; `import_catchments()` brings those in and
   prepares their DEM for the terrain functions.
 - `ak_prefetch(x)` downloads everything the layers need first (before a long
-  run, before going offline, or to fill a shared cache) and says which layers
-  need a manual download.
+  run, before going offline, or to fill a shared cache). The RGI glaciers
+  need a free Earthdata Login in a `.netrc` file (`vignette("data-sources")`).
+- `ak_citations(x)` gives the references, terms of use and acknowledgements
+  for every layer on `x`, and writes them to a BibTeX file.
 - Parallel: start mirai daemons (`mirai::daemons(4)`) and the per-site
   loops use them; `ak_catchments(regional = TRUE)` shares one DEM window
   between nearby sites. See `?ak_parallel` and `vignette("workflow")`.
@@ -312,7 +314,8 @@ The USGS functions use the Water Data APIs through dataRetrieval's
 `ak_layers(details = TRUE)` returns the full registry: product, citation, URL, licence,
 scale, published error, the columns that carry uncertainty, how it is
 computed, and the assumptions. **Cite the underlying datasets**, not only this
-package!
+package! `ak_citations(x)` lists the references for the layers you used, and
+`vignette("data-sources")` sets out each provider's terms of use.
 
 ## Status
 
