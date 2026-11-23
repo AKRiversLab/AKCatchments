@@ -79,5 +79,5 @@ logo <- magick::image_read("man/figures/logo.png") |>
 magick::image_blank(1280, 640, "#13315C") |>
   magick::image_composite(logo, gravity = "west", offset = "+90+0") |>
   magick::image_annotate("AKCatchments", gravity = "west", location = "+600-45", size = 92, color = "white", font = "Lato", weight = 700) |>
-  magick::image_annotate("Delineate and describe Alaska stream catchments", gravity = "west", location = "+604+45", size = 29, color = "#9CC9E8", font = "Lato") |>
+  magick::image_annotate("Delineate and describe Alaska catchments", gravity = "west", location = "+604+45", size = 29, color = "#9CC9E8", font = "Lato") |>
   magick::image_write("man/figures/socialpreview.png")
