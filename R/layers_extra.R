@@ -240,10 +240,10 @@ glacier_shapefile <- function(dir) {
   list.files(dir, "\\.shp$", recursive = TRUE, full.names = TRUE)[1]
 }
 
-# The user's netrc file with an Earthdata Login entry: ~/.netrc, or _netrc in the Windows user folder (NA if none)
-earthdata_netrc <- function() {
-  homes <- unique(c(path.expand("~"), Sys.getenv("USERPROFILE")))
-  files <- file.path(rep(homes[nzchar(homes)], each = 2), c(".netrc", "_netrc"))
+# The user's netrc file with an Earthdata Login entry: .netrc or _netrc in the home or Windows user folder (NA if none)
+earthdata_netrc <- function(homes = c(path.expand("~"), Sys.getenv("USERPROFILE"))) {
+  homes <- unique(homes[nzchar(homes)])
+  files <- file.path(rep(homes, each = 2), c(".netrc", "_netrc"))
   files <- files[file.exists(files)]
   files[vapply(files, \(f) any(grepl("urs.earthdata.nasa.gov", readLines(f, warn = FALSE), fixed = TRUE)), logical(1))][1]
 }

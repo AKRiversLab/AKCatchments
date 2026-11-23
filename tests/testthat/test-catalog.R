@@ -167,13 +167,12 @@ test_that("the RGI glaciers are found on NSIDC's server and downloaded with the 
 })
 
 test_that("the Earthdata Login is found in .netrc or _netrc in the home folder", {
-  home <- withr::local_tempdir()
-  withr::local_envvar(HOME = home, USERPROFILE = "")
-  expect_true(is.na(AKCatchments:::earthdata_netrc()))
+  home <- withr::local_tempdir()   # passed directly: on Windows, R doesn't take ~ from HOME after startup
+  expect_true(is.na(AKCatchments:::earthdata_netrc(home)))
   writeLines("machine example.org login a password b", file.path(home, ".netrc"))
-  expect_true(is.na(AKCatchments:::earthdata_netrc()))       # a netrc without Earthdata Login doesn't count
+  expect_true(is.na(AKCatchments:::earthdata_netrc(home)))   # a netrc without Earthdata Login doesn't count
   writeLines("machine urs.earthdata.nasa.gov login a password b", file.path(home, "_netrc"))
-  expect_equal(AKCatchments:::earthdata_netrc(), file.path(home, "_netrc"))
+  expect_equal(AKCatchments:::earthdata_netrc(c(home, "")), file.path(home, "_netrc"))
 })
 
 test_that("ak_fire appends static columns, or returns a table by year or for sample windows", {
