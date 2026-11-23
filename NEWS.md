@@ -38,6 +38,23 @@ New: `catchment_join()` puts a one-row-per-site table (with its
 provenance) on the catchments; `ak_write(x, file, ...)` writes named tables
 too, with their provenance in the one provenance layer.
 
+## NLCD 2001 Alaska error matrix
+
+* `ak_landcover(error_matrix = "selkowitz2011")` bias-adjusts the NLCD class
+  shares with the Level II error matrix of Selkowitz and Stehman (2011, Table
+  4a), shipped in `inst/extdata/nlcd_ak2001_error_matrix.csv`. The table
+  gives percent of area; each row is turned into counts with an effective
+  sample size that reproduces the SE of the class's user's accuracy in their
+  Table 3a (the sample was clustered, so the pixel counts overstate it). Two
+  printed cells that disagree with the row and column totals and the Level I
+  matrix are corrected (map 43 x reference 41: 0.64 to 0.04; map 71 x
+  reference 95: 0.40 to 0.00). The transcription and derivation are in
+  `data-raw/nlcd_ak2001_error_matrix.R`.
+* The land-cover vignette describes the assessment (design, regional and
+  edge differences, unsampled classes) and no longer says its sample was
+  stratified by map class (it was geographically stratified).
+* `ak_citations()` adds Olofsson et al. (2014) to the land-cover references.
+
 ## Citing the data, and fewer manual downloads
 
 * `ak_citations(x)` returns the references for every layer recorded in

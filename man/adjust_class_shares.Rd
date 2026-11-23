@@ -25,7 +25,8 @@ catchments and patch edges are usually worse than the regional figure.
 }
 \details{
 For NLCD 2016 Alaska no accuracy assessment exists; the NLCD 2001 Alaska
-matrix (Selkowitz and Stehman 2011) is the nearest available.
+matrix (Selkowitz and Stehman 2011) is the nearest available, and
+\code{\link[=ak_landcover]{ak_landcover()}} applies it with \code{error_matrix = "selkowitz2011"}.
 }
 \references{
 Olofsson, P. et al. (2014) Good practices for estimating area

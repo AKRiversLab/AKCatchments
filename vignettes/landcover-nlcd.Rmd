@@ -47,11 +47,14 @@ ak_provenance(x)
 ak_landcover(sf::read_sf("hand_catchments.gpkg"))            # your own polygons with site_code (or import_catchments())
 ```
 
-With an error matrix of reference-sample counts (rows map class, columns
-reference class, both named with NLCD codes such as `"41"`):
+Bias-adjusted shares, with the NLCD 2001 Alaska accuracy assessment
+(Selkowitz and Stehman 2011; section 4), or with a matrix of your own
+reference-sample counts (rows map class, columns reference class, both named
+with NLCD codes such as `"41"`):
 
 ```{r adjust, eval = FALSE}
-ak_landcover(x, error_matrix = em)          # adds nlcd_adj_pct_<class> with _se, _lo95, _hi95
+ak_landcover(x, error_matrix = "selkowitz2011")   # adds nlcd_adj_pct_<class> with _se, _lo95, _hi95
+ak_landcover(x, error_matrix = em)                # your own matrix
 ```
 
 ## 3. What you get
@@ -65,10 +68,35 @@ ak_landcover(x, error_matrix = em)          # adds nlcd_adj_pct_<class> with _se
 ## 4. Uncertainty: how it is computed
 
 **Product error (P).** No accuracy assessment exists for the 2016 Alaska
-map. The only Alaska assessment is for NLCD 2001: overall accuracy 76.2%
-(s.e. 2.8%) at Level II with primary-or-alternate reference labels, and
-59.4% with primary labels only (Selkowitz and Stehman 2011). Accuracy was
-higher for common classes and patch interiors.
+map. The only Alaska assessment is for NLCD 2001 (Selkowitz and Stehman
+2011): 2,321 pixels in 30 blocks of 27 × 27 km, one per geographic stratum
+(the western Alaska Peninsula was left out), labelled from a fixed-wing
+aircraft. Overall accuracy was 76.2% (s.e. 2.8%) at Level II when a match
+with either the primary or an alternate reference label counted, and 59.4%
+with the primary label only. Accuracy was higher for common classes and
+patch interiors (edge pixels 14% lower than all pixels), and varied by
+region, from 63.9% in the Interior Boreal to 87.6% in the coastal
+rainforests and mountains. Twelve Level II classes were assessed; the
+developed classes (21-24), moss (74), pasture (81) and crops (82), 0.14% of
+the map together, were never sampled.
+
+**The shipped matrix (`error_matrix = "selkowitz2011"`).** Their Table 4a
+gives, for each map class (row) and reference class (column), the
+estimated percent of Alaska's area, with agreement by primary or alternate
+label (its diagonal sums to the 76.2%). The adjustment needs, for each map
+class, the share of its pixels that truly belong to each class, and how
+many independent samples that share rests on. The shares are each row
+divided by its total. The sample was clustered (30 blocks, flight lines,
+pixels), so the pixel counts overstate the information. The package uses
+an effective sample size for each map class instead: the one that
+reproduces the SE of that class's user's accuracy in their Table 3a. That
+size is 13 to 132 pixels, against 16 to 546 sampled. Two printed cells
+disagree with their row and column totals and with the Level I matrix:
+map 43 × reference 41 (printed 0.64, taken as 0.04) and map 71 × reference
+95 (printed 0.40, taken as 0.00). The transcription, corrections and
+derivation are in `data-raw/nlcd_ak2001_error_matrix.R` in the package
+source; the result is
+`system.file("extdata", "nlcd_ak2001_error_matrix.csv", package = "AKCatchments")`.
 
 **Calculation.** Without an error matrix, `ak_landcover()` reports the
 mapped shares with `nlcd_flag` (`no_2016_assessment` always,
@@ -76,8 +104,9 @@ mapped shares with `nlcd_flag` (`no_2016_assessment` always,
 of **sample counts** (rows = map class, columns = reference class, NLCD
 codes as names), it adds bias-adjusted shares with SE (Olofsson et al.
 2014): the adjusted share of class *k* is Σᵢ Wᵢ nᵢₖ / nᵢ., where Wᵢ is the
-catchment's mapped share of class *i*, and its variance is Σᵢ Wᵢ² qᵢₖ(1 −
-qᵢₖ) / (nᵢ. − 1), with qᵢₖ = nᵢₖ / nᵢ.:
+catchment's mapped share of class *i* (among the classes in the matrix),
+and its variance is Σᵢ Wᵢ² qᵢₖ(1 − qᵢₖ) / (nᵢ. − 1), with qᵢₖ = nᵢₖ / nᵢ.
+Mapped shares of classes outside the matrix are left out of Wᵢ:
 
 ```{r olofsson}
 em <- matrix(c(40, 0, 10, 50), 2, dimnames = list(map = c("forest", "shrub"), reference = c("forest", "shrub")))
@@ -90,10 +119,13 @@ shrub and no mapped-shrub pixel is forest, so the adjusted share is 0.7 x
 0.8 = 56%. Misclassification **biases**
 shares, not just blurs them.
 
-**Assumptions.** The regional matrix applies inside each catchment; the
-2001 matrix applies to the 2016 map; the reference sample was stratified
-by map class. The SE reflects the size of the reference sample, not
-catchment-specific error, so it is the same order for every catchment.
+**Assumptions.** The statewide matrix applies inside each catchment,
+although accuracy varied by region (lowest in the Interior Boreal) and was
+lower at patch edges, which dominate small catchments; the 2001 matrix
+applies to the 2016 map, whose own accuracy has never been assessed; and an
+effective sample size per map class stands in for the cluster design. The
+SE reflects the reference sample, not catchment-specific error, so it is
+the same order for every catchment.
 
 **Alternatives.** No adjustment (biased shares, no SE); a matrix from your
 own reference points; another product with its own published matrix

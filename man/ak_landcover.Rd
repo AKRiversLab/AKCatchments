@@ -13,7 +13,8 @@ ak_landcover(catchments, source = "nlcd2016", error_matrix = NULL)
 
 \item{source}{Land cover product: \code{"nlcd2016"}.}
 
-\item{error_matrix}{Optional confusion matrix of counts, as above.}
+\item{error_matrix}{Optional: \code{"selkowitz2011"} for the NLCD 2001 Alaska
+error matrix, or a confusion matrix of counts, as above.}
 }
 \value{
 \code{catchments} with columns added: \verb{nlcd_pct_<class>}, \code{nlcd_pct_coverage_pct}
@@ -31,17 +32,30 @@ ScienceBase. Codes outside the NLCD legend (fill) are dropped.
 Uncertainty: no accuracy assessment exists for the 2016 Alaska map. For
 NLCD 2001 Alaska, overall accuracy was 76.2\% (s.e. 2.8\%) at Level II with
 primary-or-alternate reference labels and 59.4\% with primary labels only
-(Selkowitz and Stehman 2011). Errors bias class shares. Give that error
-matrix (sample counts, rows = map class, columns = reference class, both
-named with NLCD codes such as \code{"41"}) as \code{error_matrix} to add
+(Selkowitz and Stehman 2011). Errors bias class shares.
+\code{error_matrix = "selkowitz2011"} adjusts them with that assessment's
+Level II error matrix (their Table 4a, shipped with the package), adding
 bias-adjusted shares with SE and 95\% interval for every catchment
-(Olofsson et al. 2014, via \code{\link[=adjust_class_shares]{adjust_class_shares()}}). The adjustment is a
-regional correction: its SE reflects the reference sample, not
-catchment-specific error.
+(Olofsson et al. 2014, via \code{\link[=adjust_class_shares]{adjust_class_shares()}}). Or give a matrix of
+your own (sample counts, rows = map class, columns = reference class,
+both named with NLCD codes such as \code{"41"}). The adjustment is a regional
+correction: its SE reflects the reference sample, not catchment-specific
+error, and the 2001 matrix is assumed to apply to the 2016 map.
+\code{vignette("landcover-nlcd")} explains how the shipped matrix was made.
 
 \code{nlcd_flag}: \code{no_2016_assessment} always (the map is unassessed),
 \code{small_catchment} under 1 km2 (accuracy was lower near patch edges, which
 dominate small areas), \code{partial_coverage} under 95\% mapped.
+}
+\references{
+Selkowitz, D. J. and Stehman, S. V. (2011). Thematic accuracy
+of the National Land Cover Database (NLCD) 2001 land cover for Alaska.
+Remote Sensing of Environment 115, 1401-1407.
+\doi{10.1016/j.rse.2011.01.020}
+
+Olofsson, P. et al. (2014). Good practices for estimating area and
+assessing accuracy of land change. Remote Sensing of Environment 148,
+42-57. \doi{10.1016/j.rse.2014.02.015}
 }
 \seealso{
 \code{vignette("landcover-nlcd")} (download, use, uncertainty, validation)

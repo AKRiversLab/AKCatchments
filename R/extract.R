@@ -201,7 +201,8 @@ positional_one <- function(it, sigma_m, n, of) {
 #' catchments and patch edges are usually worse than the regional figure.
 #'
 #' For NLCD 2016 Alaska no accuracy assessment exists; the NLCD 2001 Alaska
-#' matrix (Selkowitz and Stehman 2011) is the nearest available.
+#' matrix (Selkowitz and Stehman 2011) is the nearest available, and
+#' [ak_landcover()] applies it with `error_matrix = "selkowitz2011"`.
 #'
 #' @param map_pct Named numeric: mapped class shares (%) for one catchment.
 #' @param error_matrix Matrix of sample counts with class names on both axes.

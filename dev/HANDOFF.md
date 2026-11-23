@@ -133,7 +133,7 @@ choice, error handling, pitfalls and how reliably they are reported.
   `catchment_flag_check.csv`. Values of every other existing column are
   unchanged.
 - Still open: Daymet interpolation error for Alaska (station
-  cross-validation files), the NLCD 2001 Alaska error matrix, map dates vs
+  cross-validation files), map dates vs
   sample dates (not quantified), SE for climate summaries other than
   `tdd_snowoff`.
 
@@ -451,11 +451,22 @@ the old function and must move to `compare_catchments()`.
 - **Not yet tried against the real servers** (the sandbox can't reach them): run `ak_prefetch(x, "glaciers")`
   with a netrc file, and `ak_prefetch(x, "permafrost")`, and add live tests once they work.
 
+## 4k. NLCD 2001 Alaska error matrix (2026-11-23)
+
+- Caleb supplied Selkowitz and Stehman (2011). Table 4a (p. 1406): Level II matrix in percent of area, rows map,
+  columns reference, primary-or-alternate agreement (diagonal 76.2%), n per row. Table 3a: user's accuracy, SE.
+- `data-raw/nlcd_ak2001_error_matrix.R` transcribes both, corrects two printed cells that break the row and column
+  totals and exceed the Level I matrix (43x41: 0.64 -> 0.04; 71x95: 0.40 -> 0.00), and writes effective counts:
+  row proportions x (UA(1-UA)/SE^2 + 1), so `adjust_class_shares()` reproduces each class's published UA and SE
+  (tested). Effective sizes 13-132 against 16-546 pixels (cluster design effect).
+- `ak_landcover(error_matrix = "selkowitz2011")` reads `inst/extdata/nlcd_ak2001_error_matrix.csv`; provenance
+  records the name. Classes 21-24, 74, 81, 82 were never sampled: left out of the adjustment's weights.
+- Not done: regional matrices (the paper gives only regional overall accuracy, Interior Boreal 63.9%).
+
 ## 5. Still open from the error audit
 
-The Selkowitz & Stehman NLCD 2001 Alaska confusion matrix (for
-`ak_landcover(error_matrix = )`) and the Daymet station cross-validation
-files for Alaska.
+The Daymet station cross-validation files for Alaska. (The Selkowitz &
+Stehman matrix is in the package since 2026-11-23, section 4k.)
 
 ## 6. How the user likes to work
 

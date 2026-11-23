@@ -52,6 +52,19 @@ test_that("NLCD shares are bias-adjusted per catchment from an error matrix", {
   expect_true(all(c("nlcd_adj_pct_shrub_se", "nlcd_adj_pct_shrub_lo95") %in% names(adj)))
 })
 
+test_that("the shipped NLCD 2001 Alaska matrix reproduces Selkowitz and Stehman's user's accuracies and SEs", {
+  em <- as.matrix(read.csv(system.file("extdata", "nlcd_ak2001_error_matrix.csv", package = "AKCatchments"),
+                           row.names = 1, check.names = FALSE))
+  expect_equal(rownames(em), colnames(em))
+  shares <- data.frame(site_code = c("evergreen", "mix"), nlcd_pct_evergreen = c(100, 30), nlcd_pct_dwarf_shrub = c(0, 50),
+                       nlcd_pct_shrub = c(0, 20), nlcd_pct_dev_open = c(0, 5))   # developed classes weren't assessed
+  adj <- AKCatchments:::landcover_adjust(shares, em)
+  expect_equal(adj$nlcd_adj_pct_evergreen[1], 84.1, tolerance = 0.002)      # Table 3a: 84.1 (3.2)
+  expect_equal(adj$nlcd_adj_pct_evergreen_se[1], 3.2, tolerance = 0.01)
+  sums <- rowSums(adj[, paste0("nlcd_adj_pct_", AKCatchments:::nlcd_classes[rownames(em)])])
+  expect_equal(unname(sums), c(100, 100), tolerance = 1e-6)
+})
+
 test_that("PRISM consistency checks flag inconsistent normals", {
   d <- data.frame(site_code = c("A", "B"), prism_tmean_07 = c(12, 12), prism_tmax_07 = c(18, 18), prism_tmin_07 = c(6, 3))
   expect_equal(AKCatchments:::prism_consistency(d), c("", "tmean_not_mid"))
