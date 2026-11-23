@@ -1,0 +1,141 @@
+---
+title: "Alder cover: ACCS Alnus foliar cover"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Alder cover: ACCS Alnus foliar cover}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Mean *Alnus* (alder) foliar cover over each catchment from the Alaska
+Center for Conservation Science (ACCS) continuous foliar cover maps for
+North American Beringia (Nawrocki et al. 2021; 10 m; Zenodo record 4770218,
+CC BY 4.0). It covers arctic and boreal Alaska; its southern edge runs at
+about 61.0-61.8 N between Cook Inlet and the Canadian border, so much of
+southern Wrangell-St. Elias is outside it (for that, see
+`vignette("alder-wrst")`).
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic, once: the `alnus.zip` archive (about 5.4 GB) is downloaded from
+Zenodo into the cache's `accs_alnus/` folder and unpacked there. Downloads
+have no total time limit and stop only if nothing arrives for 2 minutes.
+To fetch it ahead of a long run or for a shared cache:
+
+```{r prefetch, eval = FALSE}
+ak_prefetch(x, layers = "alder/accs2021")
+```
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")   # one catchment
+ak_alder(d)                                     # one catchment: its row with the columns added
+
+x <- ak_catchments(pts)                                  # many: data frame of site_code, lat, lon
+x <- ak_alder(x)                            # columns appended to x, provenance recorded
+ak_provenance(x)
+
+ak_alder(sf::read_sf("hand_catchments.gpkg"))            # your own polygons with site_code (or import_catchments())
+```
+
+## 3. What you get
+
+`site_code`, `alnus_cover` (mean % cover over the mapped part),
+`alnus_coverage_pct` (share of the catchment the map covers),
+`alnus_cover_se`, `alnus_cover_lo95`, `alnus_cover_hi95`,
+`alnus_cover_flag` (`outside_map`: no map data, value `NA`;
+`partial_coverage`: 0-95% mapped, the mean describes only that part;
+`error_exceeds_cover`: no Beta interval fits, the normal one cut at 0-100
+is used).
+
+## 4. Uncertainty: how it is computed
+
+**Product error (P).** RMSE 10.5% at site scale, 4.9% at 10 x 10 km, 1.4%
+at ecoregion scale; site-scale R² 0.58 (Nawrocki et al. 2021). Validation
+was cross-validation without spatial blocking, so these may be optimistic.
+
+**Aggregation (A).** `alnus_cover_se` is the RMSE interpolated linearly on
+log10(area) between the three anchors (one 10 m cell; 100 km²; 25,000 km²,
+our assumption for "ecoregion"), constant beyond them (table in `vignette("uncertainty")`,
+section 3). The RMSE is used as the SE, so any map bias at that scale is included
+in it.
+
+**Interval.** Cover is bounded at 0 and 100%, and at low cover the SE can
+be as large as the value. The 95% interval is the 2.5-97.5% range of a
+Beta distribution with the map value as mean and the SE as SD. Earlier
+versions used a logit-scale delta method, which breaks down near the
+bounds:
+
+```{r alder-interval}
+cover <- c(2, 20, 50); se <- AKCatchments:::alder_se(10)   # the SE for a 10 km2 catchment
+p <- cover / 100; v <- (se / 100)^2; phi <- p * (1 - p) / v - 1
+logit_hi <- 100 * plogis(qlogis(p) + 1.96 * (se / 100) / (p * (1 - p)))
+data.frame(cover, se = round(se, 2),
+           beta_lo = round(100 * qbeta(0.025, p * phi, (1 - p) * phi), 2),
+           beta_hi = round(100 * qbeta(0.975, p * phi, (1 - p) * phi), 1),
+           old_logit_hi = round(logit_hi, 1))
+```
+
+At 2% cover the logit interval reached about 87%; the Beta interval stays
+plausible. Where the SE is too large for any Beta with that mean (SE above
+√(p(1 − p)), very low cover in a small catchment) the interval is the
+normal one cut at 0 and 100, and `alnus_cover_flag` says
+`error_exceeds_cover`.
+
+**Not included.** Delineation; the map's date (imagery of roughly the
+2010s); partial coverage (`partial_coverage` flag; the mean describes only
+the mapped part).
+
+**Alternatives.** The guide's regional accuracy tables (Interior Alaska
+values, if they differ); a fitted spatial-correlation model of the
+residuals (would give a smooth area dependence instead of interpolation);
+the two bounding cases in section 3 of `vignette("uncertainty")`. Fully correlated error (SE 10.5
+everywhere) would make most catchments' alder values indistinguishable.
+
+**Downstream.** The map is a model prediction, shrunk toward the mean:
+its error behaves more like Berkson error (true = mapped + error) than
+classical error, so regression slopes on it are not attenuated much but
+their uncertainty is understated (`vignette("uncertainty")`, section 6).
+
+## 5. Checking and validating it
+
+- **Field plots.** Where you have plot cover estimates (AKVEG, your own
+  transects), compare them with the catchment or plot-buffer mean; expect
+  scatter of the size of the site-scale RMSE (10.5%) for single plots and
+  much less for catchment means of many plots.
+- **A second map.** In Wrangell-St. Elias, the NPS land cover map gives an
+  independent alder signal (`vignette("alder-wrst")`); the agreement at
+  sites both cover is a check on both.
+- **How much it matters.** `attribute_reliability()` gives the share of the
+  between-site spread of `alnus_cover` that is error:
+
+```{r reliability, eval = FALSE}
+attribute_reliability(ak_alder(x), vars = "alnus_cover")
+```
+
+## 6. Pitfalls
+
+- `partial_coverage` catchments: the value is the mapped part's mean, not
+  the catchment's.
+- Missing values are not missing at random: they are the southern,
+  warmest, most coastal sites.
+- The map is a model prediction (smoothed toward the mean): treat its
+  error as Berkson-like (`vignette("uncertainty")`, section 6).
+- Imagery date: roughly the 2010s; alder has expanded since earlier maps.
+
+## References
+
+- Nawrocki, T. W. et al. (2021). Continuous foliar cover of plant species and aggregates in North American Beringia, user guide v1.0. Alaska Center for Conservation Science. Data: Zenodo record 4770218.

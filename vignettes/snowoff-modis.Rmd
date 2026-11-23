@@ -1,0 +1,124 @@
+---
+title: "Snow-off date: MODIS, filled from Daymet"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Snow-off date: MODIS, filled from Daymet}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+The date each catchment became snow-free each year, from the NPS/GINA MODIS
+snow metrics (Zhu et al. 2025; 500 m; snow years 2001-2022; end of the
+longest continuous snow season), with years or catchments that MODIS
+misses filled from the Daymet melt day plus a calibrated site offset.
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic: each annual MODIS file (about 740 MB) is downloaded from the
+Arctic Data Center once and cropped to the catchments plus 1 km, into the
+cache's `modis_snow/`. `keep_full = TRUE` keeps the statewide files so
+later calls for other areas crop instead of downloading again (worth it
+for a shared cache). The fill needs Daymet (`vignette("weather-daymet")`).
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")
+ak_snowoff(d, years = 2001:2022, fill = FALSE)    # MODIS only
+
+x <- ak_catchments(pts)
+w <- ak_weather(x, years = 1991:2024)                  # the fill needs the daily weather
+so <- ak_snowoff(x, years = 2001:2022, weather = w)    # every weather year: MODIS where valid, else Daymet + offset
+attr(so, "calibration")
+ws <- weather_at_samples(w, samples, snowoff = so)     # days and degree days since snow-off at each sample
+```
+
+## 3. What you get
+
+A table, one row per site and year, with its provenance: `modis_doy`,
+`modis_valid_frac`, `modis_cloud_days`, `snowoff_rmse_d`, `snowoff_flag`
+(`low_valid`, `cloudy`); with the fill (the default), also `daymet_doy`,
+`snowoff_offset`, `snowoff_doy`, `snowoff_source` (`modis` or
+`daymet_offset`), `snowoff_se_d`, for every year of the weather.
+
+## 4. Uncertainty: how it is computed
+
+**MODIS rows.** `snowoff_se_d` is the published RMSE against SNOTEL for
+the region (Pan et al. 2020: 8 days Interior, 14 days Western Alaska and
+the North Slope). MODIS runs early, more so under cloud (Lindsay et al.
+2015): `modis_cloud_days` and the `cloudy` flag show where. The RMSE is
+point-based; a catchment median is probably better than a point, so this
+is cautious.
+
+**Filled rows.** Years without MODIS use Daymet melt + a site offset
+(MODIS minus Daymet, shrunk toward the all-site mean by empirical Bayes).
+Their SE is
+
+&nbsp;&nbsp;&nbsp;&nbsp;SE² = RMSE² + s² + v,
+
+where s is the within-site SD of MODIS minus Daymet across overlap years
+(how well the fill predicts the MODIS date in a new year) and v is the
+variance of the site's offset (small with many overlap years, the
+between-site variance plus the mean's variance with none). Adding the
+MODIS RMSE treats the fill's departure from MODIS as independent of
+MODIS's departure from the ground. That is **conservative**: if Daymet's
+and MODIS's errors are independent of each other, MODIS − fill already
+contains the MODIS error, and the fill's error against the ground is
+smaller, √(max(s² − RMSE², 0) + v). The two cases bracket the truth
+(illustrative numbers):
+
+```{r snowoff-se}
+rmse <- 8; s <- 10
+v <- c(n_overlap_10 = 0.5, n_overlap_2 = 4, no_overlap = 12)   # illustrative offset variances
+data.frame(reported = round(sqrt(rmse^2 + s^2 + v), 1), if_independent = round(sqrt(pmax(s^2 - rmse^2, 0) + v), 1))
+```
+
+If s is smaller than the RMSE, the independent case cannot hold as
+stated (the point-based RMSE overstates MODIS's catchment-scale error),
+which is one more reason to report the conservative value. Look at the
+`calibration` attribute of `ak_snowoff()` for your own s and offsets.
+
+*Changed in this version: filled rows used the residual SD alone, which
+measured agreement with MODIS rather than with the ground and made filled
+years look more certain than MODIS years.*
+
+**Propagation into observations.** `days_since_snowoff` has the date's SE
+(`snowoff_se_d`). `tdd_snowoff_se` is that SE times the mean thawing
+temperature over the days within one SE of snow-off: moving snow-off by a
+day adds or removes that day's thawing degrees (a first-order, delta-method
+approximation).
+
+## 5. Checking and validating it
+
+- **SNOTEL.** Melt-out dates at SNOTEL sites near your catchments are the
+  ground truth the published RMSE comes from; compare where a site is
+  inside or next to a catchment.
+- **The fill.** `attr(so, "calibration")` reports the within-site slope of
+  MODIS on Daymet: near 1 means an offset is enough; far from 1, the fill
+  is biased in early or late years.
+- **Passive microwave.** Pan et al. (2020) snow-off (6.25 km, unaffected by
+  cloud) is an independent check.
+
+## 6. Pitfalls
+
+- MODIS runs early, more so under cloud (`cloudy` flag).
+- Glacier and perennial-snow pixels never melt and drop out of the median.
+- The RMSE is point-based; a catchment median is probably better.
+
+## References
+
+- Lindsay, C. et al. (2015). Deriving snow cover metrics for Alaska from MODIS. Remote Sensing 7, 12961-12985.
+- Pan, C. G., Kirchner, P. B., Kimball, J. S. and Du, J. (2020). A long-term passive microwave snowoff record for the Alaska region 1988-2016. Remote Sensing 12, 153.
+- Zhu, J. et al. (2025). NPS/GINA MODIS snow metrics for Alaska. Arctic Data Center, doi:10.18739/A2057CV28.

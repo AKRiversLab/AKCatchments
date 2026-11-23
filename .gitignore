@@ -1,0 +1,11 @@
+.Rproj.user
+.Rhistory
+.RData
+.Rdata
+.httr-oauth
+.DS_Store
+inst/doc
+*.tif
+*.gpkg
+doc
+Meta

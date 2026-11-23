@@ -1,0 +1,93 @@
+---
+title: "Climate normals: PRISM 1981-2010 for Alaska"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Climate normals: PRISM 1981-2010 for Alaska}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Catchment means of the PRISM 30-arc-second (~800 m) monthly and annual
+normals for Alaska, 1981-2010 (PRISM Climate Group and NPS Alaska
+Inventory and Monitoring, 2018): mean, minimum and maximum temperature
+and precipitation. These are the normals behind the NPS basin descriptors'
+monthly climate columns.
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic, once per variable and period (an ARC ASCII grid in a zip) into
+the cache's `prism_ak_8110/` folder. The grids run across the date line
+(longitude 172-237 E), which the package handles. `ak_prefetch()`
+downloads all 52.
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")   # one catchment
+ak_climate_normals(d)                                        # one catchment (PRISM 1981-2010 by default)
+
+x <- ak_catchments(pts)                                  # many: data frame of site_code, lat, lon
+x <- ak_climate_normals(x)                                   # columns appended to x, provenance recorded
+ak_provenance(x)
+
+ak_climate_normals(sf::read_sf("hand_catchments.gpkg"))   # your own polygons with site_code
+```
+
+Only some grids: `ak_climate_normals(x, vars = c("tmean", "ppt"), periods = c("07", "annual"))`.
+Normals from Daymet over 1991-2020 instead (matching the anomalies of
+`weather_at_samples()`): `ak_climate_normals(x, "daymet4", weather = w)`,
+with `w` from `ak_weather()`; see `vignette("weather-daymet")`.
+
+## 3. What you get
+
+`prism_<var>_<period>` (°C or mm; periods `01`-`12` and `annual`) and
+`prism_flag` (`tmean_not_mid`, `annual_mismatch`, `out_of_order`).
+
+## 4. Uncertainty: how it is computed
+
+No error is published for these grids. `prism_flag` marks internal
+inconsistencies (monthly mean not between min and max, annual not
+matching the months), the way bad values show up. An alternative is the
+difference between PRISM and another normals product (TerraClimate,
+CHELSA, or Daymet's own 1991-2020 climatology) as an empirical spread.
+
+## 5. Checking and validating it
+
+Compare with Daymet's own climatology over 1991-2020 (a different period,
+method and station set): a spread between the two products is an
+empirical uncertainty where PRISM gives none.
+
+```{r compare, eval = FALSE}
+w <- ak_weather(x, years = 1991:2020)
+x |>
+  ak_climate_normals(vars = "tmean", periods = "07") |>                       # PRISM 1981-2010
+  ak_climate_normals("daymet4", vars = "tmean", periods = "07", weather = w) |> # Daymet 1991-2020
+  sf::st_drop_geometry() |>
+  dplyr::transmute(site_code, prism_tmean_07, daymet_tmean_07, diff = daymet_tmean_07 - prism_tmean_07)
+```
+
+Expect Daymet's 1991-2020 to be warmer by the warming between periods;
+site-to-site differences beyond that are product disagreement.
+
+## 6. Pitfalls
+
+- 1981-2010, not 1991-2020: don't mix with Daymet baselines without saying
+  so.
+- 800 m cells against small catchments: one or two cells.
+- Terms: free with attribution; confirm redistribution of derived tables.
+
+## References
+
+- PRISM Climate Group, Oregon State University, and NPS Alaska Region Inventory and Monitoring (2018). 1981-2010 climate normals for Alaska, 30 arc-seconds.

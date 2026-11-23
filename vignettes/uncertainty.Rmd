@@ -1,0 +1,290 @@
+---
+title: "Uncertainty: where it comes from, how it is computed, and how it reaches your observations"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Uncertainty: where it comes from, how it is computed, and how it reaches your observations}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Every catchment attribute in this package is a summary of somebody else's
+map or model over a polygon we drew. Both can be wrong. This vignette
+covers what is common to all layers: how to read the uncertainty columns,
+where error comes from, the central problem of aggregating map error to a
+catchment, how the uncertainty reaches your observations, what it does to
+analyses, and the alternatives at a glance. Each dataset's own
+calculation is in its vignette (section 4 lists them). Chunks that only
+compute are run, so the numbers below come from the package itself.
+
+## 1. Reading the columns
+
+| suffix | meaning | how to use it |
+|---|---|---|
+| `_se` | standard error: the SD of the plausible true values around the reported one | error bars, reliability, measurement-error models |
+| `_lo95`, `_hi95` | 95% interval; may be asymmetric (bounded variables) | report with the value |
+| `_lo`, `_hi` (soils, Pastick) | **bounds or ranges, not intervals**: the value under the most and least favourable assumption, or an average of the product's low/high values | sensitivity analyses, not error bars |
+| `geol_major_contains_pct_*` / `geol_contains_pct_*` | lower and upper bounds of the same quantity | report both |
+| `_flag` | named conditions under which the value should not be trusted as is | filter, stratify or report |
+| `_coverage_pct` | share of the catchment the map covers; the value describes only that part | check before use |
+
+An SE describes a distribution; a bound describes an assumption. Don't turn
+bounds into SEs (dividing a range by 4 implies a distribution the product
+never gave), and don't treat an SE as a bound.
+
+## Computing the attributes
+
+```{r usage, eval = FALSE}
+x <- ak_catchments(pts) |>                                # or import_catchments(your polygons)
+  ak_alder() |>                                           # each layer appends its value and uncertainty columns
+  ak_landcover(error_matrix = em) |>                      # Olofsson adjustment when you have a matrix
+  ak_permafrost(sigma_m = 1000) |>
+  ak_soils(lh_range = 0.9)
+w <- ak_weather(x, years = 1990:2023)
+wx <- weather_at_samples(w, samples)                      # samples: site_code, sample_date
+ak_layers(details = TRUE)                                 # product, citation, published error, method, assumptions
+ak_provenance(x)                                          # where each column came from
+attribute_reliability(x)                                  # how much of each variable's spread is error
+```
+
+## 2. Where uncertainty comes from
+
+Every number has up to six sources of error. The columns carry some of them
+and not others, and it matters which.
+
+| code | source | example | who causes it |
+|---|---|---|---|
+| **P** | the product is wrong | the alder map predicts 12% where there is 20% | the data producer |
+| **A** | aggregating pixel errors to the catchment | whether 10,000 alder pixels' errors cancel or add up | our assumption about spatial correlation |
+| **S** | sampling | Daymet averaged over 10-50 points, not every pixel | our calculation |
+| **D** | delineation | the polygon includes a neighbour's headwater | our delineation |
+| **T** | time mismatch | glacier outlines from about 2000, samples from 2020 | the product's date vs yours |
+| **M** | method choices | permafrost class ranges, channel threshold, rain-snow ramp | our (documented) assumptions |
+
+What each layer's uncertainty columns include:
+
+| layer | function | P | A | S | D | T | M | kind of uncertainty reported |
+|---|---|---|---|---|---|---|---|---|
+| polygon | `ak_catchments()`, `ak_delineate()` | – | – | – | flags, validation | – | flags | diagnostics, flags, IoU against references |
+| topography | `ak_topography()` | – | – | – | – | – | resolution | values at 10 and 30 m; `topo_flag` |
+| outlet slope | `ak_outlet_slope()` | – | – | – | snap | – | two reaches | sensitivity (100 vs 200 m) |
+| alder | `ak_alder()` | yes | yes | – | – | – | – | SE, Beta 95% interval, flags |
+| alder, WRST alternate | `ak_alder(source = "nps_wrst")` | signature spread | exact | – | – | – | unrecorded alder | SE, Beta 95% interval, unrecorded share, flags |
+| land cover | `ak_landcover()` | with an error matrix | regional | – | – | – | – | bias-adjusted shares, SE, flags |
+| permafrost (Jorgenson) | `ak_permafrost()` | class ranges, positions | yes | – | – | – | midpoints | simulated SE and 95% interval, flag |
+| permafrost (Pastick) | `ak_permafrost(source = "pastick2015")` | – | – | – | – | – | masked land | bounds, flags |
+| geology | `ak_geology()` | composition | – | – | – | – | equal allocation | bounds; optional positional spread |
+| soils | `ak_soils()` | composition | – | – | – | – | L/H as 90% range | SE and interval for shares; L/H bounds |
+| glaciers | `ak_glaciers()` | positions | yes | – | – | not included | – | simulated SE and 95% interval, flag |
+| fire | `ak_fire*()` | detection threshold | – | – | – | – | – | threshold carried; flag |
+| PRISM normals | `ak_climate_normals()` | – | – | – | – | – | – | consistency flag only |
+| daily weather | `ak_weather()` | not included | – | yes | – | – | – | sampling SE, flag |
+| weather anomalies | `weather_at_samples()` | not included | – | yes | – | – | – | sampling SE, flag |
+| snow-off | `ak_snowoff()` | yes | – | – | – | – | conservative fill | SE per site-year, flags |
+| degree days since snow-off | `weather_at_samples(snowoff = )` | via snow-off | – | – | – | – | – | delta-method SE |
+| stream temperature, USGS | `ak_obs_*()` | provider QC | – | – | – | – | – | qualifiers carried |
+| climate projections | `ak_climate_projection()`, `projection_ensemble()` | model spread | sub-grid flagged | internal variability | – | – | one run per model | per-model SE, ensemble SD and interval, flags |
+| greenness | `ak_peak_ndvi()` | calibration | shared peak error | points | – | – | calibration floor | SE, 95% interval, trend SE with sensor steps, flags |
+
+Two absences matter most. **Delineation error (D) is in no `_se`
+column**: it is reported through flags and validation, and measured with
+`polygon_spread()` (`vignette("delineation")`, section 6). **Daymet's
+interpolation error (P) is not in the weather SEs**, because no Alaska
+figures exist yet (`vignette("weather-daymet")`).
+
+## 3. The core problem: aggregating map error to a catchment
+
+Every cell of the catchment is summarised, so the catchment mean *of the
+map* has no sampling error. Its error is the map's own error, averaged over
+the catchment. How much averaging helps depends on how the errors of
+neighbouring pixels are correlated:
+
+- if pixel errors were independent, the SE of a mean over *n* pixels would
+  be the pixel RMSE / √n: near zero for any real catchment;
+- if they are fully correlated (the map is off by the same amount
+  everywhere in the catchment), averaging doesn't help at all.
+
+Map errors are strongly correlated: they come from model bias by
+landscape type, scene effects and regional calibration. The ACCS alder map
+shows it directly: its RMSE is 10.5% cover at a 10 m site, 4.9% over 10 x
+10 km and 1.4% over an ecoregion (Nawrocki et al. 2021). With independent
+errors the 10 x 10 km figure would be about 0.01%.
+
+```{r alder-aggregation}
+area <- c(0.1, 1, 10, 100, 1000)                     # km2
+data.frame(area_km2 = area,
+           independent_pixels = round(10.5 / sqrt(area * 1e4), 3),   # 10 m pixels
+           package = round(AKCatchments:::alder_se(area), 2),                    # interpolated on log(area)
+           fully_correlated = 10.5)
+```
+
+The package's choice is the middle column: the published RMSE at each
+scale, interpolated on log(area). Do not use the SD of the pixel values
+inside the catchment, or a bootstrap of them, as an SE: that measures how
+varied the catchment is, not how uncertain its mean is.
+
+## 4. Product by product
+
+How each product's uncertainty is computed, what it leaves out, the
+alternatives and how to check it are in that dataset's vignette (section
+4 of each), next to how to download and use it:
+
+```{r child = "_layers.md"}
+```
+
+## 5. How the uncertainty reaches your observations
+
+Water samples, invertebrate samples and other observations get catchment
+attributes by joining: static attributes by site, time-varying ones by
+site and date. The error comes along, and its **structure** matters as
+much as its size.
+
+| attribute | error shared by | examples |
+|---|---|---|
+| static attributes | every sample from the site | alder, land cover, permafrost, geology, soils, topography |
+| polygon error | every attribute and every sample of the site | all of the above at once |
+| snow-off, fire windows | every sample in the site-year | `snowoff_doy`, `days_since_snowoff`, `tdd_snowoff`, `burn_frac_5yr` |
+| weather anomalies | samples on the same date (and nearby dates) | `t_anom7`, `p_anom30` |
+| regional product bias | every site in a region | NLCD error matrix, alder ecoregion RMSE, Daymet station density, permafrost class ranges |
+
+Consequences:
+
+- **A site's samples are not independent replicates of its attributes.**
+  Repeating a static value and its SE on 30 samples does not give 30
+  pieces of information about the attribute. Keep static and time-varying
+  tables separate (CAKN-Data does), and model the attribute's error at
+  the site level.
+- **Errors are correlated across attributes of a site** through the
+  polygon, and within compositional sets (land-cover shares sum to 100).
+- **Shared regional errors move whole regions.** They bias intercepts and
+  between-region contrasts more than within-region slopes.
+
+## 6. What the uncertainty does downstream
+
+### Classical vs Berkson error
+
+- *Classical*: observed = true + error (sampling error, a noisy
+  measurement). Regression slopes on the observed value are attenuated
+  toward zero by the reliability ratio λ = var(true) / var(observed).
+- *Berkson*: true = observed + error (a smooth model prediction or a
+  group average assigned to members). Slopes are not attenuated; only
+  their uncertainty is understated.
+
+Map products made by statistical models (alder cover, permafrost
+probability, interpolated weather, PRISM) are closer to Berkson;
+classification maps (NLCD, permafrost classes) misclassify, which is
+neither; Daymet point sampling is classical. A quick simulation:
+
+```{r berkson}
+set.seed(2)
+n <- 2000
+true_c <- rnorm(n); obs_c <- true_c + rnorm(n, 0, 0.7)        # classical
+obs_b <- rnorm(n); true_b <- obs_b + rnorm(n, 0, 0.7)         # Berkson
+y_c <- 2 * true_c + rnorm(n); y_b <- 2 * true_b + rnorm(n)
+c(true_slope = 2, classical = unname(coef(lm(y_c ~ obs_c))[2]), berkson = unname(coef(lm(y_b ~ obs_b))[2]),
+  expected_classical = 2 / (1 + 0.7^2))
+```
+
+### How much does error matter for your variables?
+
+`attribute_reliability()` compares each variable's SE with its spread across
+sites. Reliability near 1 means the error is negligible for comparing
+sites; near 0 means the values differ mostly by error:
+
+```{r reliability}
+x <- data.frame(site_code = letters[1:6],
+                alnus_cover = c(1, 3, 8, 15, 30, 45), alnus_cover_se = c(6, 6, 5, 4.5, 4, 4),
+                totperm_pct = c(55, 60, 62, 70, 75, 80), totperm_pct_se = c(12, 10, 11, 8, 9, 7))
+attribute_reliability(x)
+```
+
+Here alder's error is small next to its range across sites, while the
+permafrost values differ between sites by no more than their error
+(reliability 0): a permafrost effect would be hard to detect and, under
+classical error, its slope underestimated.
+
+### Ways to use the columns, roughly in order of effort
+
+1. **Report** values with their intervals and flags; that is what the
+   columns are for.
+2. **Screen**: run `attribute_reliability()`; drop or stratify by flags
+   (`delin_ok`, `partial_coverage`, `jitter_dominates`,
+   `small_catchment`) and check whether results change.
+3. **Sensitivity**: refit with the `_lo` and `_hi` bounds, or with
+   alternative assumptions (`sigma_m`, `lh_range`, `concentration`).
+4. **Simulation**: draw plausible values per *site* (normal on a suitable
+   scale, or Beta for percentages, using `_se`), refit for each draw, and
+   combine the fits (multiple-imputation rules). Draw once per site and
+   reuse the draw for all of the site's samples.
+5. **Measurement-error models**: treat the true attribute as a latent
+   variable at the site level. Note that `brms::me()` puts an independent
+   error on each row; with several samples per site that is wrong for
+   static attributes (it treats the site's error as independent across
+   its samples). Model the site-level covariate in a separate part of the
+   model, or aggregate to sites first.
+
+The CAKN nitrogen analysis uses the columns as a data product (options 1-3)
+and does not feed them into its models; other users may need 4 or 5.
+
+## 7. Alternatives at a glance
+
+| layer | package method | alternative | effect of switching |
+|---|---|---|---|
+| alder | RMSE interpolated on log(area) | fully correlated (site RMSE everywhere) | SEs 1.5-3x larger for 1-1000 km² |
+| alder | Beta interval | logit delta method | absurdly wide intervals at low cover |
+| alder (WRST) | unrecorded alder = class mean | unrecorded alder = 0 | lower alder where aerial plots dominate; SE unchanged |
+| land cover | no adjustment unless a matrix is given | Olofsson with the 2001 matrix | shares shift systematically; SE added |
+| permafrost | uniform within class, rigid shifts, σ = 1 km | central-weighted class fractions; per-boundary jitter; σ 0.5-2 km | smaller SE; smaller SE for large catchments; SE roughly scales with σ in small catchments |
+| permafrost | isolated 1-10% | isolated 0-10% | midpoint 5.5 → 5%; tiny effect |
+| geology | bounds; σ = 127 m if run | σ = 59 m (strict NMAS) or 2-4x | narrower or wider positional spread |
+| soils | L/H as a 90% range | L/H as an 80% range | SE about 28% larger |
+| soils | concentration 20 where L/H missing | 5 or 50 | much larger or smaller SE for those map units |
+| Daymet | sampling SE only | add Alaska station cross-validation error | larger SE, mostly for absolute values, little for anomalies |
+| Daymet | 10-50 sampled points | every pixel (gridded download) | no sampling error; more download |
+| snow-off fill | conservative: RMSE² + s² + v | independent errors: s² − RMSE² + v | smaller SE for filled years |
+| snow-off MODIS | regional RMSE | RMSE scaled by cloud days | larger SE in cloudy years |
+| snow-off | MODIS + Daymet fill | passive-microwave snow-off (Pan et al. 2020; 6.25 km, not affected by cloud, about ±11 days) as an independent check | a between-product spread |
+| polygon | flags, validation, alternative polygons | boundary jitter | misleadingly small, structural errors missed |
+| climate projections | per-model deltas + ensemble spread | ensemble mean only | hides structural uncertainty |
+| climate projections | prediction interval for one more model | model range (min-max) | narrower with few models |
+| greenness | sensors calibrated to Landsat 7 | uncalibrated | sensor offsets of a few hundredths; spurious trends |
+| greenness | peak SE shared among points | independent among points | SE several times smaller for large catchments |
+| greenness | calibration SE floor 0.002 | held-out bias only | smaller trend SE |
+
+## 8. What is not included, and what would close the gaps
+
+- Delineation error in the `_se` columns: use `polygon_spread()`.
+- Daymet interpolation error: needs the Daymet V4 station
+  cross-validation files for Alaska (ORNL DAAC).
+- NLCD 2016 accuracy: needs the Selkowitz and Stehman (2011) error matrix
+  or your own reference points.
+- Map dates against sample dates (glaciers ~2000, NLCD 2016, Jorgenson
+  ~2008, alder ~2010s): flagged in the documentation, not quantified.
+- PRISM and Pastick: no error distribution published; bounds and flags
+  only.
+- Soil map-unit and geology contact positions: optional, through
+  `positional_uncertainty()`.
+
+## References
+
+- Berner, L. T. et al. (2020). Summer warming explains widespread but not uniform greening in the Arctic tundra biome. Nature Communications 11, 4621.
+- Berner, L. T., Assmann, J. J., Normand, S. and Goetz, S. J. (2023). 'LandsatTS': an R package to facilitate retrieval, cleaning, cross-calibration, and phenological modeling of Landsat time series data. Ecography 2023, e06768.
+- Cannon, A. J., Sobie, S. R. and Murdock, T. Q. (2015). Bias correction of GCM precipitation by quantile mapping: how well do methods preserve changes in quantiles and extremes? Journal of Climate 28, 6938-6959.
+- Ju, J. and Masek, J. G. (2016). The vegetation greenness trend in Canada and US Alaska from 1984-2012 Landsat data. Remote Sensing of Environment 176. Data: doi:10.3334/ORNLDAAC/1576.
+- Kim, T. et al. (2025). Ensemble downscaled climate dataset for Alaska and Hawaii under historical and future conditions. Scientific Data 12, 1089.
+- Lavoie, J. et al. (2024). ESPO-G6-R2: bias-adjusted CMIP6 simulations for North America. Scientific Data, doi:10.1038/s41597-023-02855-z.
+- Kampes, B. et al. (2011). Fugro GeoSAR airborne dual-band IFSAR DTM processing. ASPRS 2011 Annual Conference.
+- Lindsay, C., Zhu, J., Miller, A. E., Kirchner, P. and Wilson, T. L. (2015). Deriving snow cover metrics for Alaska from MODIS. Remote Sensing 7, 12961-12985.
+- Nawrocki, T. W. et al. (2021). Continuous foliar cover of plant species and aggregates in North American Beringia, user guide v1.0. Alaska Center for Conservation Science.
+- Olofsson, P. et al. (2014). Good practices for estimating area and assessing accuracy of land change. Remote Sensing of Environment 148, 42-57.
+- Pan, C. G., Kirchner, P. B., Kimball, J. S. and Du, J. (2020). A long-term passive microwave snowoff record for the Alaska region 1988-2016. Remote Sensing 12, 153.
+- Pastick, N. J. et al. (2015). Distribution of near-surface permafrost in Alaska: estimates of present and future conditions. Remote Sensing of Environment 168, 301-315.
+- Selkowitz, D. J. and Stehman, S. V. (2011). Thematic accuracy of the National Land Cover Database (NLCD) 2001 land cover for Alaska. Remote Sensing of Environment 115, 1401-1407.
+- Thornton, P. E. et al. (2021). Gridded daily weather data for North America with comprehensive uncertainty quantification. Scientific Data 8, 190.
+- USDA NRCS. National Soil Survey Handbook, Part 618 (soil properties and qualities).
+- Wilson, F. H. et al. (2015). Geologic map of Alaska. USGS Scientific Investigations Map 3340.

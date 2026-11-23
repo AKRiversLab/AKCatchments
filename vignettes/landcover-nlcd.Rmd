@@ -1,0 +1,139 @@
+---
+title: "Land cover: NLCD 2016 Alaska"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Land cover: NLCD 2016 Alaska}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Shares of each NLCD Level II class in each catchment from the NLCD 2016
+Alaska release (Dewitz 2019, doi:10.5066/P96HHBIE; 30 m), the most recent
+NLCD land cover for Alaska. Optionally bias-adjusted with an error matrix
+(Olofsson et al. 2014).
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic, once: the statewide raster is downloaded from ScienceBase (the
+link is looked up in the item record, since direct file links have changed
+before) into the cache's `nlcd_2016_ak/` folder.
+
+```{r prefetch, eval = FALSE}
+ak_prefetch(x, layers = "landcover/nlcd2016")
+```
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")   # one catchment
+ak_landcover(d)                                     # one catchment: its row with the columns added
+
+x <- ak_catchments(pts)                                  # many: data frame of site_code, lat, lon
+x <- ak_landcover(x)                            # columns appended to x, provenance recorded
+ak_provenance(x)
+
+ak_landcover(sf::read_sf("hand_catchments.gpkg"))            # your own polygons with site_code (or import_catchments())
+```
+
+With an error matrix of reference-sample counts (rows map class, columns
+reference class, both named with NLCD codes such as `"41"`):
+
+```{r adjust, eval = FALSE}
+ak_landcover(x, error_matrix = em)          # adds nlcd_adj_pct_<class> with _se, _lo95, _hi95
+```
+
+## 3. What you get
+
+`nlcd_pct_<class>` (percent of the mapped part; classes `water`,
+`icesnow`, `dev_open` ... `woody_wetland`, `herb_wetland`),
+`nlcd_pct_coverage_pct`, `nlcd_flag` (`no_2016_assessment` always,
+`small_catchment` under 1 km², `partial_coverage`). With `error_matrix`:
+`nlcd_adj_pct_<class>` and its `_se`, `_lo95`, `_hi95`.
+
+## 4. Uncertainty: how it is computed
+
+**Product error (P).** No accuracy assessment exists for the 2016 Alaska
+map. The only Alaska assessment is for NLCD 2001: overall accuracy 76.2%
+(s.e. 2.8%) at Level II with primary-or-alternate reference labels, and
+59.4% with primary labels only (Selkowitz and Stehman 2011). Accuracy was
+higher for common classes and patch interiors.
+
+**Calculation.** Without an error matrix, `ak_landcover()` reports the
+mapped shares with `nlcd_flag` (`no_2016_assessment` always,
+`small_catchment` under 1 km², `partial_coverage`). With an error matrix
+of **sample counts** (rows = map class, columns = reference class, NLCD
+codes as names), it adds bias-adjusted shares with SE (Olofsson et al.
+2014): the adjusted share of class *k* is Σᵢ Wᵢ nᵢₖ / nᵢ., where Wᵢ is the
+catchment's mapped share of class *i*, and its variance is Σᵢ Wᵢ² qᵢₖ(1 −
+qᵢₖ) / (nᵢ. − 1), with qᵢₖ = nᵢₖ / nᵢ.:
+
+```{r olofsson}
+em <- matrix(c(40, 0, 10, 50), 2, dimnames = list(map = c("forest", "shrub"), reference = c("forest", "shrub")))
+em                                       # 50 mapped-forest pixels checked: 40 forest, 10 shrub; 50 mapped-shrub: all shrub
+adjust_class_shares(c(forest = 70, shrub = 30), em)
+```
+
+The map says 70% forest; one in five mapped-forest pixels is really
+shrub and no mapped-shrub pixel is forest, so the adjusted share is 0.7 x
+0.8 = 56%. Misclassification **biases**
+shares, not just blurs them.
+
+**Assumptions.** The regional matrix applies inside each catchment; the
+2001 matrix applies to the 2016 map; the reference sample was stratified
+by map class. The SE reflects the size of the reference sample, not
+catchment-specific error, so it is the same order for every catchment.
+
+**Alternatives.** No adjustment (biased shares, no SE); a matrix from your
+own reference points; another product with its own published matrix
+(ESA WorldCover). The choice of matrix moves every catchment the same way,
+so it shifts means and intercepts more than it changes rankings.
+
+**Downstream.** Shares are compositional: they sum to 100 and their errors
+are negatively correlated (pixels moved out of one class go into another).
+Don't put all classes in one model, and expect the adjustment to move
+correlated classes together.
+
+## 5. Checking and validating it
+
+- **Build your own error matrix** from reference points (field plots, or
+  points labelled on high-resolution imagery), stratified by map class:
+
+```{r own-matrix, eval = FALSE}
+pts <- sf::read_sf("lc_reference_points.gpkg")              # a `reference` column with NLCD codes
+map <- terra::extract(terra::rast(list.files(ak_cache_dir("nlcd_2016_ak"), "\\.(tif|img)$",
+                                             recursive = TRUE, full.names = TRUE)[1]),
+                      terra::vect(sf::st_transform(pts, 3338)))[[2]]
+em <- table(map = map, reference = pts$reference)
+ak_landcover(x, error_matrix = unclass(em))
+```
+
+- **Another product.** ESA WorldCover 2021 (10 m; live test P05 reads it)
+  gives an independent classification; compare shares of forest, shrub,
+  water and ice at your sites.
+- **Glacier and water shares** can be checked against RGI glaciers
+  (`vignette("glaciers-rgi")`) and the imagery plots.
+
+## 6. Pitfalls
+
+- Shares are compositional: errors in one class come out of others.
+- The 2016 map has never been assessed; 2001 accuracy applied to 2016 is
+  an assumption.
+- Small catchments are mostly patch edges, where accuracy is lowest.
+
+## References
+
+- Dewitz, J. (2019). National Land Cover Database (NLCD) 2016 products. USGS data release, doi:10.5066/P96HHBIE.
+- Olofsson, P. et al. (2014). Good practices for estimating area and assessing accuracy of land change. Remote Sensing of Environment 148, 42-57.
+- Selkowitz, D. J. and Stehman, S. V. (2011). Thematic accuracy of the National Land Cover Database (NLCD) 2001 land cover for Alaska. Remote Sensing of Environment 115, 1401-1407.

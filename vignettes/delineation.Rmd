@@ -1,0 +1,613 @@
+---
+title: "Delineation: from a point on a stream to a checked catchment"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Delineation: from a point on a stream to a checked catchment}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+has_wbt <- isTRUE(suppressMessages(whitebox::wbt_init()))
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+The catchment is the unit every other part of the package works on. This
+vignette covers getting one: running a delineation for one point or many
+(section 1), how it works and where automated delineation goes wrong
+(section 2), the reference data used to check it (section 3), validating
+against hand-drawn catchments, StreamStats and USGS gaged basins (section
+4), building a final set (section 5), and how polygon error reaches the
+attributes (section 6). Section 7 is the map of everything you can add to
+a catchment once you have it.
+
+Chunks that download data are not run when the vignette is built; chunks
+that only compute run, some only where WhiteboxTools is installed.
+
+```{r cache, eval = FALSE}
+ak_set_cache("D:/AKCatchments_cache", persist = "user")  # once; any folder with room (tens of GB)
+whitebox::install_whitebox()                             # once: the flow-routing engine
+```
+
+## 1. Running a delineation
+
+### 1.1 One point
+
+```{r, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001",
+                  dem_source = "ifsar", flowlines = "3dhp",
+                  plot_dir = "delineation_plots")
+d
+d$catchment[, c("area_km2", "snap_dist_m", "snap_method", "relief_m",
+                "flat_frac", "flowline_dist_m", "flags", "delin_ok")]
+```
+
+Open `delineation_plots/SITE-001.png`. Check four things:
+
+* the snapped outlet (yellow) sits on the stream you sampled, not a
+  neighbouring tributary;
+* the DEM channels (blue) follow the stream visible in the imagery and the
+  reference flowlines (orange);
+* the outline follows ridgelines, not a straight edge or a valley floor;
+* no reference flowline enters the catchment from outside.
+
+If the outlet snapped to the wrong channel, either give the known area
+(`ref_area_km2`), switch `snap = "nearest"`, or move the point.
+
+### 1.2 Many points
+
+```{r, eval = FALSE}
+pts <- read.csv("sites.csv")   # site_code, lat, lon; optional ref_area_km2, snap_dist_m, ...
+x <- ak_catchments(pts, plot_dir = "delineation_plots", keep_delineations = TRUE)
+x                              # delin_ok and flags per site
+attr(x, "errors")              # sites that failed, with the reason
+ak_write(x, "auto_catchments.gpkg")
+
+# nearby sites sharing one DEM window (downloaded and conditioned once):
+xr <- ak_catchments(pts, regional = TRUE)
+table(xr$window_mode)
+# where the time went, per site and step:
+sf::st_drop_geometry(x)[c("site_code", "t_dem_s", "t_condition_s", "t_watershed_s", "t_flowlines_s", "t_plot_s", "t_total_s")]
+```
+
+Columns of `pts` named like `ak_delineate()` arguments apply to their row
+only: give `ref_area_km2` where you know the area, a larger `snap_dist_m`
+where the point is far from the channel, or `dem_source = "copernicus"`
+where a catchment crosses into Canada (`nodata_edge`). A progress bar names
+the site being delineated; to run sites in parallel, start mirai daemons
+first (`mirai::daemons(4)`; see `?ak_parallel` and `vignette("workflow")`,
+which also covers when `regional = TRUE` pays off).
+
+### 1.3 What you get, and what to do with it
+
+A delineation is an `ak_delineation` object; `d$catchment` is a one-row sf
+polygon (EPSG:3338) with `site_code`, area, diagnostics, `flags` and
+`delin_ok`. `ak_catchments()` returns one such row per site, plus the
+kept rasters (the conditioned DEM, D8 pointer and accumulation, in the
+cache: a few MB for a small catchment, a few hundred MB for one of
+thousands of km2; `keep_rasters = FALSE` keeps only the polygon, for
+repeated runs or when disk is short). **Every layer function in the package takes either
+directly**: a single delineation, a list of them, `ak_catchments()`
+output, or any sf polygons with `site_code` (bring hand-drawn or other
+polygons in with `import_catchments()`, which also prepares their DEM for
+the terrain functions). Layer functions with one value per site append
+their columns to what you pass in and record where they came from:
+
+```{r io, eval = FALSE}
+ak_alder(d)                          # one delineation: its row, with the alder columns
+ak_alder(list(d, d2))                # several
+x <- x |> ak_alder() |> ak_landcover() |> ak_topography()   # columns appended, provenance recorded
+ak_provenance(x)
+hand <- import_catchments(sf::read_sf("hand_catchments.gpkg"))   # your own polygons
+```
+
+## 2. How delineation works, and where it goes wrong
+
+### 2.1 The pipeline
+
+For each point:
+
+1. **Check the point.** Coordinates are converted to WGS84 (`crs`
+   argument of `ak_catchments()`: NAD83 and NAD27 are common in Alaska site
+   lists; NAD27 is 100-200 m off). Points outside Alaska's latitude and
+   longitude range are warned about before anything is downloaded.
+2. **Get a DEM window** centred on the point, `start_buffer_m` from it in
+   each direction (default the larger of 5 km and twice the square root of
+   any reference area).
+3. **Check there is elevation data at the point**; stop with a clear
+   message if not.
+4. **Condition the DEM** with WhiteboxTools: least-cost breaching of
+   depressions (breach paths up to 100 cells; whatever can't be breached is
+   filled), then D8 flow directions and D8 flow accumulation.
+5. **Snap the point** to a channel cell (contributing area at least
+   `stream_threshold_km2`, 0.05 km²) within `snap_dist_m` (150 m).
+6. **Delineate** the area upstream of the snapped cell (`wbt_watershed`).
+7. **Is it complete?** If the catchment reaches the window's outer edge,
+   double the window and start again from step 2, up to `max_buffer_m`.
+8. **Turn the raster catchment into a polygon**, compute diagnostics,
+   compare with reference flowlines, and set flags.
+9. **Keep** the DEM, breached DEM, D8 pointer and accumulation, cropped to
+   the catchment plus a margin, for terrain attributes and re-plotting.
+10. **Plot** the catchment on satellite imagery.
+
+With `ak_catchments(regional = TRUE)`, steps 2-3 are done once for each
+group of nearby points (all within `cluster_km`, by default as far apart as
+fits in one window at the DEM's resolution, 20 km for 5 m IfSAR), and steps
+4-10 for each point on the shared rasters. A point whose catchment reaches
+the shared window's edge, or that fails there, goes through the per-site
+loop above. `window_mode` says which path a site took, and the `t_*_s`
+columns how long each step took.
+
+### 2.2 Which DEM, when
+
+The DEM is the one you ask for. Only `"best"` chooses, window by window,
+and `dem_source` (with `dem_project` for lidar) says what it chose.
+
+| `dem_source` | what it is | resolution | coverage | use |
+|---|---|---|---|---|
+| `"ifsar"` (default) | Alaska IfSAR digital terrain model (bare earth), from the DGGS image service | 5 m, coarsened for large windows | Alaska | the default for everything |
+| `"lidar"` | a lidar bare-earth model: State of Alaska (DGGS) projects and USGS 3DEP 1 m DEMs, newest first | 2 m by default | where one project has elevation for the whole window (`ak_lidar_index()`) | small catchments in towns, along roads and at hazard sites |
+| `"best"` | lidar where it covers the window, else IfSAR | 2 m lidar, else 5 m | Alaska | when you want lidar wherever it exists |
+| `"copernicus"` | Copernicus GLO-30, from its public cloud bucket | 30 m | global | across the Canadian border, as a check on IfSAR, or as `fallback_dem` |
+| `"local"` | your own GeoTIFF tiles (`dem_dir`, default the cache's `dem` folder) | native unless `res` is set | your tiles | reproducing earlier work, lidar where you have it |
+| `"elevatr"` | AWS terrain tiles (zoom 12) | varies; coarse and noisy in Alaska | global | last resort |
+
+Where it is set:
+
+- `ak_delineate(dem_source = )`, or `ak_catchments(..., dem_source = )` for
+  every site, or a `dem_source` column in the points table for single
+  sites.
+- `fallback_dem` (off by default): a second source used when the first
+  fails at a site (no data at the point, a service or tile error) or gives
+  a catchment that runs into missing data. The result says so
+  (`dem_fallback = TRUE`, flag `dem_fallback`, and `dem_source` names the
+  DEM used).
+- Terrain attributes (`ak_topography()`, `ak_outlet_slope()`) use the
+  rasters kept from the delineation when given `ak_catchments()` output, so
+  attributes and polygon come from the same DEM. Given other polygons, they
+  build their own window with their own `dem_source` (default IfSAR).
+- In CAKN-Data, `00_config.R` sets `AK_DEM_SOURCE` to `"local"` when IfSAR
+  tiles are in the cache's `dem` folder (the tiles the old geo workflow
+  used) and `"ifsar"` otherwise; steps 05 and 07 both use it.
+
+**Resolution in large windows.** A window never exceeds `max_cells`
+(6,000) cells a side, so for large catchments the cell size grows with the
+window. The resolution actually used is in `dem_res_m`:
+
+```{r resolution}
+half <- c(5, 10, 15, 20, 40, 60, 100)
+data.frame(window_km = 2 * half,
+           ifsar_cell_m = pmax(5, 2 * half * 1000 / 6000),
+           copernicus_cell_m = pmax(30, 2 * half * 1000 / 6000))
+```
+
+A catchment that fits in a 30 km window keeps the full 5 m; one that needs
+200 km is routed at 33 m.
+
+**What the DEMs get wrong.**
+
+- IfSAR: vertical accuracy 3 m at 90% confidence on 0-10° slopes,
+  horizontal 12.2 m CE90 (USGS). Radar sees partly into forest canopy, so
+  the bare-earth surface is estimated there; steep terrain has radar
+  shadow and layover, filled from other data (no more than 3% void fill).
+  The terrain model is hydrologically enforced (water surfaces flattened).
+  Coverage stops at the Canadian border.
+- Copernicus: a surface model, so the forest canopy's height sits on top
+  of the ground; on flat forested ground a forest edge can block or divert
+  flow. Absolute vertical accuracy better than 4 m LE90.
+- Lidar: about 0.1 m vertical in open terrain, so it resolves low-relief
+  divides and small channels that IfSAR misses. It also resolves roads,
+  ditches and culverts: a road embankment without its culvert is a dam,
+  and breaching may route flow along the road instead. Lidar windows start
+  smaller (2 km half-width) because projects are small, and a window that
+  reaches the sea or a project's edge has missing cells, so it falls back
+  (with `"best"`) to IfSAR. Projects in feet are converted using the units
+  in the state's index; projects whose units the index doesn't give are
+  skipped.
+
+### 2.3 Conditioning: why breaching, and what it does to flats
+
+Real DEMs have pits: noise, road embankments, bridges, lakes, artifacts.
+Flow routing needs every cell to drain somewhere. Two strategies:
+
+- **Filling** raises pits to their spill level. It leaves large flat areas
+  where flow directions are arbitrary.
+- **Breaching** cuts a channel through the barrier along the least-cost
+  path (here up to 100 cells: 500 m at 5 m, 3 km at 30 m), then fills
+  what remains.
+
+Breaching is better for culverts and embankments (the usual cause of
+false barriers in road corridors) and changes far fewer cells. On genuinely
+flat ground (wetlands, outwash plains, drained lake basins) any D8
+direction is a guess either way; the `low_relief` flag marks catchments
+where that matters.
+
+D8 sends all flow from a cell to one of its eight neighbours. It is
+simple and reproducible, and it puts divides along cell edges; the
+area error that causes is small. Multiple-flow methods (D-infinity, MFD)
+describe dispersion on hillslopes better but don't change catchment
+boundaries much.
+
+### 2.4 Channels and snapping
+
+A channel is any cell draining at least `stream_threshold_km2` (0.05 km²).
+The threshold is an area, so it means the same thing at 5 m and 30 m.
+
+A sample point rarely sits exactly on the DEM's channel (GPS error, the
+DEM channel displaced by a few cells, a point recorded on the bank). It is
+moved to a channel cell within `snap_dist_m`:
+
+- with a known area (`ref_area_km2`), to the cell whose contributing area
+  is closest to it (the channel threshold drops to a fifth of the reference
+  area, so small known catchments can still be found);
+- otherwise to the largest channel in reach (`snap = "largest"`, the
+  default: right for a point on a main stem) or the nearest
+  (`snap = "nearest"`: right on a small tributary next to a larger stream).
+
+Three checks report on the snap:
+
+- `snap_ambiguous`: another channel in reach has a contributing area more
+  than 25% different (and more than a fifth of the chosen one).
+  Along one channel, area changes much less than that over 150 m, so this
+  means a confluence or a neighbouring stream is in reach.
+  `snap_alt_area_km2` gives that other channel's area: the size of the
+  possible error.
+- `snap_off_stream`: following the D8 flow paths, the snapped outlet is
+  not on the sample point's stream. A point and its outlet on the same
+  stream either drain one through the other, or the outlet's path reaches
+  the point within the snap radius; on neighbouring streams, or on the two
+  branches above a confluence, the paths meet only further down or not at
+  all.
+- `snap_at_limit`: the snap moved the point 90% or more of the radius,
+  so the right channel may be just outside it.
+
+A confluence example (no WhiteboxTools needed): a 1 km² main stem is
+joined 30 m below the point by a 0.4 km² tributary. Snapping to the
+largest channel takes the cell below the junction:
+
+```{r confluence}
+r <- terra::rast(terra::ext(0, 1000, 0, 1000), resolution = 10, crs = "EPSG:3338", vals = 1)
+rc <- terra::rowColFromCell(r, seq_len(terra::ncell(r)))
+v <- rep(1, terra::ncell(r))
+v[rc[, 2] == 50 & rc[, 1] < 60] <- 10000            # main stem above the junction: 1 km2 (10 m cells)
+v[rc[, 1] == 60 & rc[, 2] > 50 & rc[, 2] <= 80] <- 4000
+v[rc[, 2] == 50 & rc[, 1] >= 60] <- 14000           # below the junction: 1.4 km2
+terra::values(r) <- v
+acc <- tempfile(fileext = ".tif"); terra::writeRaster(r, acc)
+pt <- sf::st_sf(site_code = "Y", geometry = sf::st_sfc(
+  sf::st_point(terra::xyFromCell(r, terra::cellFromRowCol(r, 57, 52))[1, ]), crs = 3338))
+blind <- AKCatchments:::snap_point(pt, acc, 150, NA, 0.05, "largest")
+guided <- AKCatchments:::snap_point(pt, acc, 150, 1, 0.05, "largest")
+rbind(blind = sf::st_drop_geometry(blind), guided = sf::st_drop_geometry(guided))
+```
+
+Blind, the snap adds the tributary (40% too much area) and says so; given
+the known area, it takes the main stem.
+
+**Snapping with a reference stream network.** Most sites have no known
+area, but a global stream network can stand in for one. TDX-Hydro, built
+from 12 m TanDEM-X and distributed by GEOGLOWS (`ak_download_flowlines(aoi,
+"geoglows")`), gives every reach of 5 km2 or more its upstream area at both
+ends. Two rules use it:
+
+- `snap = "reference"`: the cell whose area best fits a reach within
+  `snap_reference_dist_m` (300 m). This is the network on its own: good when
+  the point is off-channel beside a mapped river, wrong when the point is on
+  a stream the network doesn't have (under 5 km2), or when the nearest reach
+  is a different stream.
+- `snap = "consensus"`: the terrain decides *which* watershed, and the
+  network decides *where along it*. The outlet must lie on the point's own D8
+  flow path, so it can't jump to a neighbouring stream or to the other branch
+  above a confluence. Among the cells on that path, the one whose area fits a
+  nearby reach (within a factor of 1.5) wins; with no fit, the largest one on
+  the path. With no channel on the path within the radius, the best reference
+  fit, else the largest channel.
+
+```{r, eval = FALSE}
+ak_download_flowlines(sf::st_bbox(pts_sf), "geoglows")   # once: Alaska VPUs 801-803
+x <- ak_catchments(pts, snap = "consensus", snap_reference = "geoglows", snap_alternatives = TRUE,
+                   keep_delineations = TRUE)
+x[c("site_code", "snap_evidence", "snap_area_largest_km2", "snap_area_reference_km2", "snap_area_consensus_km2")]
+```
+
+Each site records what each rule would have chosen
+(`snap_area_largest_km2`, `snap_area_reference_km2`,
+`snap_area_consensus_km2`); with `snap_alternatives = TRUE` the other rules'
+catchments are delineated on the same rasters, in each delineation's
+`alternatives`. Where the rules agree, the snap is settled. Where they
+differ, the difference is the snapping uncertainty, and
+`snap_conflict` marks sites where the network fits a channel other than the
+one the flow path allows. Area evidence can't separate branches of similar
+size (within a factor of 1.5); there the flow path decides. A site on a
+tributary too small for the network, just above a mapped main stem, still
+snaps below the junction, as with `"largest"`; it keeps the
+`snap_ambiguous` warning.
+
+### 2.5 Window growth, truncation and missing data
+
+The window doubles while the catchment touches its **outer edge**, up to
+`max_buffer_m` (100 km by default; CAKN-Data uses 60 km). A catchment
+still touching it is flagged `truncated` (a failure).
+
+Missing elevation data inside the window is a different problem: the
+edge of the DEM's coverage (the Canadian border for IfSAR), the ocean, a
+void. A bigger window can't fix it, so it isn't treated as truncation. If
+the catchment borders missing cells away from the outlet (more than the
+larger of 250 m and twice the snap radius from it: the sea or a lake may
+legitimately start at the outlet), it is flagged `nodata_edge` (a
+failure), with a message suggesting another DEM; `fallback_dem` does that
+automatically.
+
+### 2.6 From raster to polygon
+
+The catchment cells become one polygon (cells joined, made valid). A D8
+catchment is always connected, but some cells connect only through a
+diagonal step, which becomes a corner contact in the polygon; such pieces
+count as one part, so `multipart` (a failure) only fires on genuinely
+separate pieces (which a D8 catchment can't produce, but a hand-drawn
+polygon can).
+
+Diagnostics on the polygon:
+
+| column | meaning |
+|---|---|
+| `area_km2`, `elev_min_m`, `elev_mean_m`, `relief_m`, `slope_mean_deg` | size and terrain |
+| `flat_frac` | share of cells under 1° |
+| `compactness` | 4π area / perimeter²: 1 for a circle, small for slivers |
+| `n_parts`, `outlet_boundary_m` | geometry checks |
+| `snap_*` | the snap (section 2.4) |
+| `window_m`, `dem_source`, `dem_res_m`, `truncated`, `nodata_edge` | the window |
+| `flowline_dist_m` | snapped outlet to the nearest reference flowline |
+| `flowline_crossings` | places away from the outlet (more than 250 m) where a reference flowline crosses the divide |
+| `flowline_km_inside` | length of reference flowlines inside the catchment |
+
+Reference flowlines (3DHP by default, which in Alaska carries
+IfSAR-derived hydrography where it has been produced, and the older NHD
+elsewhere) are a check, not an input: channels always come from the DEM in
+use. If the flowlines can't be fetched, the delineation goes ahead without
+them and says so.
+
+### 2.7 Flags
+
+Failures set `delin_ok = FALSE`; warnings only appear in `flags`.
+
+| flag | type | condition |
+|---|---|---|
+| `truncated` | failure | still touches the window edge at `max_buffer_m` |
+| `nodata_edge` | failure | borders missing elevation data away from the outlet |
+| `no_channel` | failure | no channel cell within the snap radius |
+| `area_mismatch` | failure | area more than 1.5x off `ref_area_km2` |
+| `multipart` | failure | polygon in separate pieces |
+| `tiny` | failure | under 0.05 km² |
+| `snap_at_limit` | warning | snapped at 90% or more of the radius |
+| `snap_ambiguous` | warning | another channel in reach differs in area by more than 25% |
+| `snap_off_stream` | warning | the outlet isn't on the point's stream by the flow paths |
+| `dem_fallback` | warning | the first DEM failed and `fallback_dem` was used |
+| `low_relief` | warning | more than 30% of cells under 1°, or relief under 50 m |
+| `flowline_far` | warning | outlet more than 100 m from the reference flowlines |
+| `flowline_crossings` | warning | a reference flowline crosses the divide away from the outlet |
+
+### 2.8 Error handling
+
+Every failure stops one site, not the run, and says why:
+
+| situation | what happens |
+|---|---|
+| point outside Alaska, swapped lat/lon | warning from `ak_catchments()` before downloading |
+| NAD27 coordinates without the PROJ grid to shift them | error (no result) or warning (no shift) naming the fix |
+| no elevation at the point (offshore, outside coverage) | error: "no elevation data at ..."; with `fallback_dem`, retried there |
+| local tiles that don't cover the window | error naming the tile folder |
+| no Copernicus tile readable | error listing each tile's reason (ocean tiles don't exist) |
+| IfSAR service returns an error page | error with the server's text; nothing cached |
+| a download comes back as a web page | refused and reported, nothing cached |
+| reference flowlines unavailable | message; delineation continues without flowline checks |
+| imagery unavailable | message; the plot uses a hillshade of the DEM |
+| empty watershed | error |
+| any error at one site in `ak_catchments()` | recorded in `attr(x, "errors")`; the other sites go on |
+
+Downloads are written under a temporary name and renamed when complete,
+so an interrupted run never leaves a half file in the cache; parallel
+workers each use their own temporary names.
+
+### 2.9 The usual pitfalls, and what this workflow does about them
+
+| pitfall | how it shows up | what the workflow does | how far to trust it |
+|---|---|---|---|
+| **Wrong datum or swapped coordinates** | point on the wrong stream or off the map | `crs` argument; NAD27 shift check; Alaska range warning; no-data error; `snap_at_limit`, `snap_off_stream`, `no_channel` | a 150 m datum error onto a parallel stream is caught only if the flow paths separate; check the plot |
+| **Point beside the channel** (GPS, bank) | outlet a few cells away | snapping within 150 m | reliable; `snap_dist_m` is reported |
+| **Wrong branch at a confluence** | area too large (below the junction) or the other branch | `snap_ambiguous` with `snap_alt_area_km2`; `snap_off_stream`; `ref_area_km2` guides the snap | good when areas differ by more than 25%; two near-equal branches are caught by the flow-path test unless they join within the snap radius |
+| **A neighbouring stream within the snap radius** | a different catchment altogether | `snap_off_stream`; `snap_ambiguous` if the sizes differ | good; look at the plot |
+| **Stream smaller than the channel threshold** | `no_channel`, or a snap to a bigger stream | threshold lowered with `ref_area_km2`; lower `stream_threshold_km2` | deterministic |
+| **Flats, wetlands, lakes** | arbitrary flow directions, divides in the wrong place | breaching rather than filling; `low_relief`; `flowline_crossings` | `low_relief` thresholds are rules of thumb; such sites need a reference polygon |
+| **Braided and glacial outwash rivers** | channels that split and rejoin; divides on gravel bars | `flowline_crossings`, `low_relief` | weak: D8 can't represent distributary flow; use a hand-drawn polygon |
+| **Glaciers and ice fields** | surface divides on ice differ from where meltwater goes | none automatic; `ak_glaciers()` shows which catchments are glaciated | not detected: treat glaciated catchment areas with caution |
+| **Road embankments, bridges, culverts** | flow blocked or diverted along a road | least-cost breaching (up to 100 cells) | good for culverts; a long embankment can still divert flow: `flowline_crossings`, the plot |
+| **DEM artifacts** (IfSAR canopy, radar shadow, voids; Copernicus canopy) | odd channels in forest, divides through valleys | bare-earth IfSAR by default; `nodata_edge` for voids at the edge | partly; compare an IfSAR and a Copernicus delineation where in doubt |
+| **Coarse resolution closes narrow gorges** | area much too small, outlet in a slot canyon | full 5 m for windows up to 30 km; `dem_res_m` reported | see the example below; compare with a reference area |
+| **Window too small** | catchment cut off at a straight edge | automatic window growth; `truncated` | deterministic |
+| **Edge of DEM coverage** (Canadian border, coast) | catchment cut off along the border | `nodata_edge`; `fallback_dem` | reliable for coverage gaps |
+| **Ocean at the outlet** | missing cells next to the outlet | tolerated within 250 m (or twice the snap radius) of the outlet | an estuary reaching further up may trip `nodata_edge` |
+| **Corner-connected cells** | a D8 catchment split into "parts" | parts touching at a corner count as one | fixed |
+| **Karst, subsurface flow, diversions** | the topographic catchment isn't the real one | none | undetectable from a DEM |
+| **Wrong reference area** | `area_mismatch` on a good delineation; a guided snap to the wrong channel | blind validation (`guided = FALSE`) | check NPS or published areas before guiding with them |
+| **Reference flowlines wrong** | `flowline_far`, `flowline_crossings` on a good delineation | flowlines used only as checks | the flags are two-sided: either may be wrong; the imagery plot decides |
+
+A resolution example on a synthetic basin (2 x 4 km bowl draining through
+a 60 m wide gap): at 20 m it is delineated correctly; at 30 m the gap is
+too narrow for the coarser grid and half the basin drains elsewhere.
+
+```{r resolution-demo, eval = has_wbt}
+synthetic_dem <- function(dir, res = 20) {
+  xg <- 200000; y0 <- 1600000; a <- 2000; b <- 4000; yc <- y0 + 4000; x0 <- xg + res / 2
+  r <- terra::rast(terra::ext(xg - 10000, xg + 10000, y0 - 6000, y0 + 14000), resolution = res, crs = "EPSG:3338")
+  xy <- terra::crds(r)
+  zin <- 100 + 0.02 * (xy[, 2] - y0) + 0.1 * abs(xy[, 1] - x0)
+  rr <- sqrt(((xy[, 1] - x0) / a)^2 + ((xy[, 2] - yc) / b)^2)
+  gap <- abs(xy[, 1] - x0) < 3 * res & xy[, 2] < y0 + 400
+  terra::values(r) <- ifelse(rr < 1 | gap, zin, zin + 50 - 0.2 * (rr - 1) * a)
+  dir.create(dir, showWarnings = FALSE)
+  terra::writeRaster(r, file.path(dir, "dem.tif"), overwrite = TRUE)
+  c(x0 = x0, y0 = y0)
+}
+s <- synthetic_dem(file.path(tempdir(), "synthetic_dem"))
+ll <- sf::st_coordinates(sf::st_transform(sf::st_sfc(sf::st_point(c(s[["x0"]], s[["y0"]] + 200)), crs = 3338), 4326))
+run <- \(res) suppressMessages(ak_delineate(ll[2], ll[1], site_code = paste0("res", res), dem_source = "local",
+                                            dem_dir = file.path(tempdir(), "synthetic_dem"), res = res, start_buffer_m = 10000,
+                                            max_buffer_m = 10000, flowlines = NULL, plot = FALSE))$catchment
+d <- rbind(run(20), run(30))
+sf::st_drop_geometry(d)[, c("dem_res_m", "area_km2", "snap_area_km2", "flags", "delin_ok")]
+```
+
+The true area is about 25 km². The 30 m delineation passes the automatic
+checks; only a reference area (`area_mismatch`) or a look at the plot
+would catch it. Not every error can be flagged from the DEM alone, which is
+why validation (section 4) matters.
+
+## 3. Reference data: flowlines, StreamStats and gaged basins
+
+Three references are used to check delineations; none is used to make
+them.
+
+**Flowlines** are drawn on the check plots and used by the
+`flowline_far` and `flowline_crossings` flags. `ak_flowline_sources()`
+lists the choices:
+
+```{r flowlines, eval = FALSE}
+fl <- ak_flowlines(d$catchment, source = "3dhp")        # USGS 3D Hydrography Program (web service; default)
+fl <- ak_flowlines(d$catchment, source = "nhd")         # NHD (legacy web service)
+ak_download_flowlines(d$catchment, source = "merit")    # MERIT-Basins: files downloaded once to the cache
+fl <- ak_flowlines(d$catchment, source = "merit")
+fl <- ak_flowlines(d$catchment, source = "file", path = "my_streams.gpkg")
+```
+
+3DHP and NHD come from web services queried for the area; MERIT-Basins
+(90 m, channels from 25 km²), HydroRIVERS and TDX-Hydro are downloaded
+once by HydroBASINS unit. Licences differ: TDX-Hydro is CC BY-SA 4.0,
+MERIT-Basins CC BY-NC-SA 4.0. TDX-Hydro's server (earth-info.nga.mil) is
+unreachable from some networks.
+
+**USGS StreamStats** (`ak_streamstats()`) delineates on its own stream grid,
+in Alaska only within the Cook Inlet Basin (including the Susitna).
+
+**USGS gaged basins** (`ak_gaged_basins()`): published boundaries for
+Alaska streamgages (Curran 2024), statewide: 253 gages through 2019 and the
+earlier release of 471 gages through 2014, about 600 gages together. They
+were digitised to the Watershed Boundary Dataset (WBD), so they share its
+boundaries above each gage, and NWIS drainage areas were updated from them.
+Independent of your own sites, they are the widest benchmark across terrain
+types.
+
+```{r references, eval = FALSE}
+ss <- ak_streamstats(61.7097, -149.2320, site_code = "USGS-15290000")
+gb <- ak_gaged_basins()                          # sf, one row per gage and condition; ids in site_code
+compare_catchments(d$catchment, ss)           # IoU, area ratio, shares inside each other, Hausdorff
+```
+
+## 4. Checking against your own reference polygons
+
+If you have hand-drawn catchments, or reference polygons from StreamStats
+or the USGS gaged basins, compare them with the delineations and draw them
+on the check plots:
+
+```{r, eval = FALSE}
+hand <- sf::read_sf("hand_delineations.gpkg")   # site_code + polygons
+x <- ak_catchments(pts, keep_delineations = TRUE)
+cmp <- compare_catchments(x, hand) |>
+  dplyr::left_join(sf::st_drop_geometry(x)[c("site_code", "delin_ok", "flags")], by = "site_code")
+cmp |> dplyr::filter(!agree | !delin_ok) |> dplyr::arrange(iou)   # sites to look at first
+
+d <- attr(x, "delineations")[["SITE-01"]]
+plot_catchment(d, reference = transform(hand[hand$site_code == "SITE-01", ], ref_source = "Hand-drawn"),
+               file = "SITE-01_vs_hand.png")
+```
+
+Delineate blind (no `ref_area_km2`) when the point is to see how the
+method does; pass a reference area only when building the final set
+(section 5).
+
+Disagreement isn't always the automated delineation's fault. Hand-drawn
+outlines on 1:63,360 topographic maps miss divides in flat terrain, and
+StreamStats delineates on its own hydro-enforced grid. The plot shows which
+outline follows the terrain.
+
+How well the method and the flags do across Alaska, against published USGS
+drainage areas and StreamStats basins in the Cook Inlet Basin, is reported
+in the package paper. The package itself does not run a validation.
+
+## 5. Building the final set
+
+### 5.1 Steps
+
+1. Run blind (`ak_catchments()` without reference areas), look at every
+   plot with a flag, and validate where references exist.
+2. Re-run the flagged sites with corrections in the points table: a
+   reference area, a larger or smaller `snap_dist_m`, `snap = "nearest"`,
+   `dem_source = "copernicus"`, or a moved point.
+3. Where the automated polygon still disagrees with a trusted reference,
+   or the terrain is braided, glaciated or flat, use the reference and
+   record that you did.
+4. Keep `ak_provenance()` and the kept rasters with the result, so every
+   polygon can be traced to its DEM, snap and settings.
+
+### 5.2 Choosing between automated and reference polygons
+
+A sensible rule: use the automated polygon where it passes the checks and
+agrees with the available reference; otherwise keep the hand-drawn polygon.
+Record which was used.
+
+```{r, eval = FALSE}
+best <- v$comparison |>
+  dplyr::filter(comparison == "auto_vs_hand") |>
+  dplyr::mutate(use = ifelse(delin_ok & agree, "auto", "hand"))
+
+final <- dplyr::bind_rows(
+  v$catchments |> dplyr::filter(site_code %in% best$site_code[best$use == "auto"]) |>
+    dplyr::mutate(catchment_source = "AKCatchments"),
+  hand |> dplyr::filter(site_code %in% best$site_code[best$use == "hand"]) |>
+    dplyr::mutate(catchment_source = "hand-drawn"))
+```
+
+Sites without any reference need their plots checked by eye before use.
+
+## 6. Polygon uncertainty and how it reaches the attributes
+
+**What is reported.** No SE. `ak_delineate()` reports the diagnostics
+of known failure modes and turns them into flags; `delin_ok` is `FALSE`
+when a failure flag is set. `compare_catchments()` measures agreement with
+reference polygons (IoU, area ratio, Hausdorff distance); how well the flags
+pick out the poor delineations is reported in the package paper.
+
+**How it reaches the attributes.** A polygon error shifts every attribute
+of the site at once, and in the same direction for correlated attributes
+(a polygon that wrongly includes a glaciated headwater raises glacier
+cover, elevation and slope together).
+
+**Measuring it.** Where a site has more than one plausible polygon
+(automated, hand-drawn, StreamStats, a delineation from another DEM),
+compute the attributes on each:
+
+```{r polygon-spread, eval = FALSE}
+sp <- polygon_spread(list(auto = x, hand = hand, copernicus = x_cop), ak_alder)
+```
+
+`sd` across polygons is the delineation part of the error. If the two
+parts are independent, the total is about √(map SE² + polygon SD²).
+
+**Alternatives.** Random boundary jitter (buffer the polygon in and out by
+a few cells) is often suggested and is the wrong model: delineation errors
+are not small random wobbles of the divide but structural (the wrong
+branch at a confluence, a divide misplaced across a flat), so they are
+either negligible or large. Alternative polygons capture that; jitter
+doesn't. For a validation set, the distribution of IoU against references
+gives the typical size of the error by flag class.
+
+**Downstream.** Treat sites with `delin_ok = FALSE` as missing or use a
+reference polygon. For a regression on catchment attributes, polygon error
+is a site-level error shared by all of a site's samples (see `vignette("uncertainty")`, section 5).
+
+## 7. Next: adding attributes to the catchments
+
+```{r child = "_layers.md"}
+```

@@ -1,0 +1,161 @@
+---
+title: "Greenness: Landsat annual peak NDVI"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Greenness: Landsat annual peak NDVI}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Annual maximum summer NDVI (NDVImax) for each catchment from Landsat 5, 7,
+8 and 9 Collection 2 Level-2 surface reflectance (30 m, 1984 on), read from
+the Microsoft Planetary Computer, and its long-term mean and trend. The
+methods follow Berner et al. (2020) and the 'LandsatTS' R package (Berner
+et al. 2023): pixel screening, cross-sensor calibration and a
+phenology-adjusted annual peak.
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic, no login: a STAC search per group of nearby catchments and
+year, an anonymous access token, and reads of four bands (red, NIR,
+QA_PIXEL, QA_RADSAT) at sample points in each summer scene. Readings are
+cached per catchment in `landsat_c2/`; later calls read only new scenes. A
+first run for a region over 40 years can take hours; failed scenes are in
+`attr(, "failed")`. A progress bar counts the groups of catchments; with
+mirai daemons running, groups are read in parallel (`?ak_parallel`).
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+x <- ak_catchments(pts)
+g <- ak_peak_ndvi(x, years = 1984:2024)               # table of annual values; call on ALL catchments together
+attr(g, "xcal")                                      # calibration of each sensor to Landsat 7
+s <- peak_ndvi_summary(g, years = 2000:2024, trend_years = 1985:2024)   # one row per site
+x <- catchment_join(x, s)                            # onto the catchments, with provenance
+
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")
+ak_peak_ndvi(d, years = 2013:2020)                   # works, but one small catchment is too few to calibrate
+```
+
+The calibration is pooled over the catchments in one call: with too few
+sample points that both sensors saw (under 30), a sensor stays
+uncalibrated and the values carry the `uncalibrated` flag.
+
+## 3. What you get
+
+`ak_peak_ndvi()`, a table with one row per site and year: `ndvi_max`,
+`ndvi_max_se`, `ndvi_max_lo95`, `ndvi_max_hi95`, `ndvi_max_cal_se`,
+`n_points`, `n_points_valid`, `veg_frac`, `obs_per_point`, `sensors`,
+`share_L5`, `share_L8`, `flag` (`few_points`, `low_coverage`,
+`sparse_vegetation`, `few_obs`, `record_edge`, `uncalibrated`).
+Attributes `points` (per point and year), `xcal`, `failed`.
+
+`peak_ndvi_summary()`: `ndvimax_mean` and `ndvimax_trend_decade`, each
+with `_se`, `_lo95`, `_hi95`, `_flag`, plus `ndvimax_n_years`,
+`ndvimax_veg_frac`.
+
+## 4. Uncertainty: how it is computed
+
+**Method.** Annual maximum summer NDVI at 30 m from Landsat 5, 7, 8 and 9
+Collection 2 surface reflectance, read at regularly spaced points in each
+catchment, screened, cross-calibrated to Landsat 7 and phenology-adjusted
+after Berner et al. (2020) and the 'LandsatTS' package (Berner et al.
+2023). The steps that matter for uncertainty:
+
+1. *Sensors differ.* Uncalibrated, Landsat 5 and Landsat 8 NDVI differ
+   from Landsat 7 by a few hundredths, the size of decades of greening.
+   Each sensor is mapped onto Landsat 7 with a polynomial fitted to paired
+   observations at points and years both sensors saw.
+2. *Few clear days.* A year's peak is estimated from the clear
+   observations that year, each moved up to the peak of a 7-year seasonal
+   curve, so the peak isn't missed just because no clear day fell on it.
+3. *Bare ground.* Points that are never green (NDVI < 0.15: rock, ice,
+   water) are left out; `veg_frac` is the vegetated share, and the value
+   describes the vegetated part only.
+
+**Annual SE.** `ndvi_max_se` = √(sampling² + peak² + calibration²):
+sampling is the SD of the point values / √points; peak is the RMS of the
+points' peak SEs, taken as fully shared among points (they see the same
+scenes on the same days), which is conservative; calibration is the SE of
+the calibration curve plus the bias left on held-out points, at least
+0.002 (below). Calibration and peak errors are systematic within a year
+and do not shrink with more points.
+
+**Two refinements of the published method**, found when testing against
+synthetic data with known sensor offsets:
+
+- LandsatTS pairs the sensors by medians within ±7 days of a focal day.
+  When the two sensors see different days of the season (they do: their
+  orbits are offset by 8 days), those medians compare different stages of
+  green-up or senescence. Here the focal day is the one nearest the
+  point's seasonal peak, and each observation is first moved to the focal
+  day along a quadratic fitted to that sensor's own observations at that
+  point. In simulation this cut the calibration's residual bias from about
+  0.02-0.03 to 0.001-0.002 NDVI.
+- The held-out check cannot see the pairing's own error, so the
+  calibration SE has a floor (`cal_floor = 0.002`, the residual bias in
+  those simulations). It is an internal figure, not a published one.
+
+**Trend SE.** `ndvimax_trend_decade_se` combines the OLS SE (years
+discounted for lag-1 autocorrelation) with the effect of a calibration
+offset on the slope: a leftover offset in one sensor becomes a step
+wherever that sensor's share of the observations changes (Landsat 5 ends
+in 2011, Landsat 8 starts in 2013). The step term is
+offset SE × slope of that sensor's share on time. Without calibration,
+`sensor_change` flags any trend spanning sensors.
+
+**Not included.** Atmospheric-correction error beyond what calibration
+absorbs; low bias of the peak in years with very few clear days (flag
+`few_obs`); differences between NDVImax and the vegetation properties you
+care about (shrub cover, biomass).
+
+**Alternatives.** MODIS MOD13Q1 (250 m, 2000 on, one sensor family) would
+be an independent check on interannual variation; the ABoVE Landsat
+products (Ju and Masek 2016, trends 1984-2012; Melaas et al. 2019, peak
+greenness 1984-2014) end before most CAKN samples.
+
+## 5. Checking and validating it
+
+- **Calibration.** Read `attr(g, "xcal")`: `uncal_bias` is the sensor
+  offset before calibration (a few hundredths is normal), `xcal_bias` what
+  remains on held-out points (should be near 0), `cal_sd` what goes into
+  the SEs.
+- **Sensor steps.** Plot each site's series with the sensor shares: a step
+  at 2012-2013 that the calibration didn't remove shows as a jump when
+  `share_L8` rises.
+- **Published trends.** Ju and Masek's Landsat NDVI trends (1984-2012) are
+  an independent estimate for the overlap years:
+
+```{r ju-masek, eval = FALSE}
+tr <- terra::rast("ABoVE_NDVI_trend_tile.tif")         # downloaded from ORNL DAAC (Earthdata login)
+catchment_mean(x, tr, "jm_trend")                     # compare with peak_ndvi_summary(g, trend_years = 1984:2012)
+```
+
+- **Vegetated share.** `veg_frac` should match the non-barren, non-ice,
+  non-water share from NLCD (`vignette("landcover-nlcd")`).
+
+## 6. Pitfalls
+
+- Values describe the vegetated points only (NDVI ≥ 0.15).
+- Calibrate across all catchments in one call.
+- Few clear days (`few_obs`) bias the peak low.
+- NDVImax is greenness, not alder or biomass.
+
+## References
+
+- Berner, L. T. et al. (2020). Summer warming explains widespread but not uniform greening in the Arctic tundra biome. Nature Communications 11, 4621.
+- Berner, L. T., Assmann, J. J., Normand, S. and Goetz, S. J. (2023). 'LandsatTS': an R package to facilitate retrieval, cleaning, cross-calibration, and phenological modeling of Landsat time series data. Ecography 2023, e06768.
+- Ju, J. and Masek, J. G. (2016). The vegetation greenness trend in Canada and US Alaska from 1984-2012 Landsat data. Remote Sensing of Environment 176. Data: doi:10.3334/ORNLDAAC/1576.
+- USGS Landsat Collection 2 Level-2 (doi:10.5066/P9IAXOVV, doi:10.5066/P9C7I13B, doi:10.5066/P9OGBGM6).

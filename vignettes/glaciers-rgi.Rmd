@@ -1,0 +1,87 @@
+---
+title: "Glaciers: Randolph Glacier Inventory 7.0"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Glaciers: Randolph Glacier Inventory 7.0}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Percent of each catchment under glacier outlines from the Randolph Glacier
+Inventory 7.0 glacier product, region 01 Alaska (NSIDC-0770,
+doi:10.5067/F6JMOVY5NAVZ; outlines for about 2000).
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+**Manual download** (NSIDC requires an Earthdata login): download RGI 7.0
+region 01 and unzip it into the cache's `rgi/` folder, or pass `path`.
+RGI 6.0 files work the same way.
+
+```{r manual, eval = FALSE}
+ak_cache_dir("rgi")
+ak_prefetch(x, layers = "glaciers/rgi7")   # says whether it is found
+```
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")   # one catchment
+ak_glaciers(d)                                     # one catchment: its row with the columns added
+
+x <- ak_catchments(pts)                                  # many: data frame of site_code, lat, lon
+x <- ak_glaciers(x)                            # columns appended to x, provenance recorded
+ak_provenance(x)
+
+ak_glaciers(sf::read_sf("hand_catchments.gpkg"))            # your own polygons with site_code (or import_catchments())
+```
+
+`sigma_m` (positional SD, 30 m) and `n` (500 draws) set the simulation;
+`sigma_m = 0` skips it.
+
+## 3. What you get
+
+`glacier_pct` (percent of the whole catchment), `glacier_pct_se`,
+`glacier_pct_lo95`, `glacier_pct_hi95`, `glacier_flag`
+(`small_glaciers`).
+
+## 4. Uncertainty: how it is computed
+
+**Calculation.** Shares of the whole catchment, with 500 random shifts of
+the outlines (SD `sigma_m`, 30 m: about one Landsat pixel) for `_se`,
+`_lo95`, `_hi95`. `glacier_flag = small_glaciers` where glaciers under 1
+km² make up more than half the glacier area (outline errors are
+proportionally larger for small glaciers).
+
+**Not included: time (T).** The outlines date from about 2000. Most
+Alaska glaciers have shrunk since, so for recent samples `glacier_pct`
+overstates ice cover by an amount the SE doesn't describe.
+
+## 5. Checking and validating it
+
+- **Other ice layers.** Compare with NLCD perennial ice and snow
+  (`nlcd_pct_icesnow`) and Pastick's `pf_icesnow_pct`; large differences
+  usually mean retreat since 2000 or debris-covered ice.
+- **Imagery.** The delineation plots are on current imagery: glaciers
+  visibly smaller than their outlines confirm the date problem.
+
+## 6. Pitfalls
+
+- About 2000 outlines against samples from the 2010s-2020s: glacier cover
+  is overstated for recent samples, by an amount not in the SE.
+- Debris-covered ice is hard to outline.
+
+## References
+
+- RGI 7.0 Consortium (2023). Randolph Glacier Inventory, version 7.0. NSIDC-0770, doi:10.5067/F6JMOVY5NAVZ.

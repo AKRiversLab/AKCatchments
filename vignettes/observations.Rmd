@@ -1,0 +1,100 @@
+---
+title: "Observations: stream temperature, USGS daily values and your own data"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Observations: stream temperature, USGS daily values and your own data}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Observations are measurements at stations, not maps, so they are not
+cropped to catchments: they are kept in one long table
+(`ak_obs_schema()`) and **linked** to catchments by where the stations
+sit (`ak_obs_link()`). This vignette covers the three sources: AKTEMP-VIZ
+stream temperature, USGS daily values, and your own tables (water
+chemistry, invertebrates).
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+- **AKTEMP-VIZ** (`ak_obs_temperature_stations()`, `ak_obs_temperature()`):
+  compiled daily water temperature (AKTEMP, USGS, NPS Aquarius) with
+  ERA5-Land air temperature at each station, read from the AKTEMP-VIZ data
+  files.
+- **USGS** (`ak_obs_usgs_stations()`, `ak_obs_usgs_daily()`): the USGS
+  Water Data APIs through `dataRetrieval`'s `read_waterdata_*` functions.
+  A free API key (`API_USGS_PAT` in `.Renviron`) raises the hourly
+  request limit.
+- **Your data** (`ak_obs_read()`): any data frame or CSV, mapped into the
+  schema.
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+x <- ak_catchments(pts)
+
+st <- ak_obs_temperature_stations()
+links <- ak_obs_link(x, st)                                  # at_outlet, inside, near
+wt <- ak_obs_temperature(st[st$station_id %in% links$station_id, ])
+
+us <- ak_obs_usgs_stations(x, parameter_code = c("00060", "00010"))
+q <- ak_obs_usgs_daily(us, parameter_code = "00060", dates = c("2010-01-01", "2023-12-31"))
+
+chem <- ak_obs_read("cakn_chemistry.csv", .pivot = c(tn_mg_l, tdn_mg_l),
+                    dataset = "CAKN chemistry", provider = "NPS CAKN", station_id = site_code,
+                    date = as.Date(sample_date), variable = sub("_mg_l$", "", variable), value = value,
+                    unit = "mg/L")
+ak_obs_validate(chem)
+```
+
+## 3. What you get
+
+All observation functions return the schema: `dataset`, `provider`,
+`station_id`, `station_name`, `lat`, `lon`, `datetime` and/or `date`,
+`variable`, `value`, `unit`, `qualifier`, `method`, `depth_m`,
+`source_url`, `retrieved`. `ak_obs_link()` returns `site_code`,
+`dataset`, `station_id`, `relation` (`at_outlet`, `inside`, `near`),
+`dist_outlet_m`, `dist_catchment_m`, `station_area_km2`,
+`station_area_frac`.
+
+## 4. Uncertainty: how it is computed
+
+These are measurements, not maps. The package adds no uncertainty: it
+carries the provider's (`qualifier` holds USGS approval status and
+qualifiers; AKTEMP values are as each provider published them after its
+own QC). The uncertainty that matters for linking them to catchments is
+**representativeness**: `ak_obs_link()` reports whether a station is at
+the outlet, inside (with `station_area_frac`, the share of the catchment
+draining to it) or near, and the distances. A station draining 5% of a
+catchment describes a headwater, not the outlet; a station 400 m below an
+outlet may include a tributary.
+
+## 5. Checking and validating it
+
+- `ak_obs_validate()` checks a table against the schema (types, required
+  columns, duplicates on dataset, station, time, variable, depth and
+  method).
+- Check `relation` and `station_area_frac` before using a station for a
+  catchment; look at `near` stations on the delineation plot.
+
+## 6. Pitfalls
+
+- A station inside a catchment may drain a small part of it.
+- USGS approval status (`qualifier`): provisional values change.
+- AKTEMP values are as each provider published them.
+
+## References
+
+- Alaska Water Temperature Database (AKTEMP) and AKTEMP-VIZ, University of Alaska Anchorage.
+- De Cicco, L. A. et al. dataRetrieval: R packages for discovering and retrieving water data available from U.S. federal hydrologic web services.

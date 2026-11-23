@@ -1,0 +1,173 @@
+---
+title: "Daily weather, anomalies and degree days: Daymet V4"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Daily weather, anomalies and degree days: Daymet V4}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Daily minimum, maximum and mean temperature, precipitation and snow water
+equivalent averaged over each catchment from Daymet V4 (1 km; Thornton et
+al. 2021), and what is derived from them: weather anomalies around each
+sample date, snowmelt day, snowfall, summer temperature and degree days.
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic: Daymet pixels are sampled at points spread over each catchment
+(one per `km2_per_point`, 5 km², between 10 and 50) and each 1 km pixel is
+downloaded once through the single-pixel API into the cache's
+`scratch/daymet_pixels/`, the same folder the geo workflow used. Pixels
+are requested a few at a time (four by default,
+`options(AKCatchments.max_active = )`), with a progress bar; a request
+that fails is retried on its own, and pixels that still fail are listed
+in `attr(w, "errors")`. Later calls reuse pixels whose years cover the
+request.
+
+Download the years you need once: the baseline for normals and anomalies
+(1991-2020 by default) plus the sample years and the year before each
+(for snowfall over the snow year).
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")
+w <- ak_weather(d, years = 1990:2023)                     # daily catchment series (a table)
+
+samples <- data.frame(site_code = "SITE-001", sample_date = as.Date(c("2019-07-10", "2021-08-02")))
+ws <- weather_at_samples(w, samples)       # anomalies (with SEs), melt day, snowfall, degree days
+
+x <- ak_catchments(pts)
+w <- ak_weather(x, years = 1990:2023)
+s <- ak_snowoff(x, years = 2001:2022, weather = w)        # vignette("snowoff-modis")
+ws <- weather_at_samples(w, samples, snowoff = s)         # adds days and degree days since snow-off
+x <- ak_climate_normals(x, "daymet4", weather = w)        # 1991-2020 monthly normals as columns
+ak_write(x, "catchments.gpkg", weather = w, samples = ws)
+```
+
+Sites without a polygon can be given as points (sf POINT): they use the
+pixel at the point. The baseline (default 1991-2020) must be inside
+`years`: `weather_at_samples()` stops if it is not.
+
+**What an anomaly is compared with.** The catchment's daily climatology
+over the baseline years: a smooth seasonal cycle (three harmonics of the
+day of year) fitted to every day of 1991-2020. `t_anom7` on 15 July is the
+mean temperature of 9-15 July that year minus the normal for 9-15 July.
+It is not the departure from a monthly mean, nor from the same calendar
+day in the raw record (one year's 15 July is mostly noise). This is the
+daily counterpart of the monthly normals that `ak_climate_normals(x,
+"daymet4", weather = w)` puts on the catchments.
+
+## 3. What you get
+
+`ak_weather()`, a table with one row per site and day: `site_code`,
+`date`, `tmin`, `tmax`, `tmean`, `prcp`, `swe`, `n_pixels`, `tmean_sd`,
+`prcp_sd`, `tmean_se_sampling`, `prcp_se_sampling`, `daymet_flag`
+(`few_pixels`), with its provenance.
+
+`weather_at_samples()`, your sample rows with: `t_anom7`, `t_anom30`,
+`t_anom7_dt`, `t_anom30_dt`, `p_anom7`, `p_anom30`, each with `_se`;
+`weather_flag`; `melt_doy`, `melt_anom`, `days_since_melt`;
+`snowfall_swe_mm`, `snowfall_depth_cm`, `summer_tmean_c`, `gdd_base0`,
+`gdd_base5`, `tdd`, `fdd`; with `snowoff` (`vignette("snowoff-modis")`),
+`tdd_snowoff`, `tdd_snowoff_se`, `days_since_snowoff`.
+
+`ak_climate_normals(x, "daymet4", weather = w)`: `daymet_<var>_<month or
+annual>` columns, with `_se` for `tmean` and `ppt`, and
+`daymet_normals_flag`.
+
+## 4. Uncertainty: how it is computed
+
+**Sampling (S).** `ak_weather()` averages Daymet pixels at regularly spaced
+points (one per 5 km², 10-50 per catchment) and reports
+`tmean_se_sampling` = between-pixel SD / √n × √(1 − n/N), with N the
+catchment's number of 1 km pixels (finite-population correction: a fully
+sampled small catchment has no sampling error). The points are a
+systematic grid, for which this simple-random-sample formula is
+conservative. *Fixed in this version: the between-pixel SD was computed
+after the column had been averaged, so the sampling SEs were always
+missing.*
+
+**Interpolation (P), not included.** Daymet's station cross-validation
+gives daily MAE of 1.52 °C (Tmax) and 1.78 °C (Tmin) for North America,
+with no Alaska figure; errors are larger where stations are sparse (high
+elevation, remote Alaska). This is much larger than the sampling SE, but
+it is mostly persistent: a pixel that is 1.5 °C too warm tends to be too
+warm every day.
+
+**Anomalies.** `weather_at_samples()` reports `t_anom7_se`,
+`t_anom30_se` (and the detrended and precipitation versions): the same
+anomalies computed for each pixel, each against its own climatology, and
+their between-pixel SD / √n × √(1 − n/N). For temperature this is exact,
+because the harmonic fit, the trend and the window means are all linear
+in the data, so the catchment anomaly is the mean of the pixel anomalies.
+It is far smaller than the daily SE, because persistent differences
+between pixels cancel:
+
+```{r anomaly-cancellation}
+set.seed(1)
+days <- 1:3650
+weather <- 10 * sin(2 * pi * days / 365) + stats::filter(rnorm(3650, 0, 2), rep(1 / 3, 3), circular = TRUE)
+offset <- rnorm(20, 0, 2)                                   # 20 pixels, persistent differences (elevation, aspect)
+px <- sapply(offset, \(o) weather + o + rnorm(3650, 0, 0.3))
+anom <- apply(px, 2, \(y) y - fitted(lm(y ~ sin(2 * pi * days / 365) + cos(2 * pi * days / 365))))
+c(daily_mean_se = sd(px[3000, ]) / sqrt(20), anomaly_se = sd(anom[3000, ]) / sqrt(20))
+```
+
+The same cancellation is why Daymet's persistent interpolation error
+matters much less for anomalies than for absolute temperatures: the part
+of it that is constant over the baseline period drops out. The part that
+varies from day to day (a station network that misses a local inversion
+this week) does not, and is not in the SE. The Daymet station
+cross-validation files for Alaska would give it.
+
+**Normals** (`ak_climate_normals(source = "daymet4")`): the sampling SE
+does not shrink by averaging days, because a pixel sample that runs warm
+runs warm every day. The temperature normal's SE is the mean of the daily
+SEs; a precipitation total's SE is the sum of the daily SEs (the upper
+bound, for errors fully correlated in time). Interpolation error enters
+normals in full.
+
+**Climate summaries** (degree days, snowfall, summer temperature) carry
+no SE. Sampling error could be computed the same way as for anomalies
+from the pixel files; interpolation error is persistent and enters
+directly (unlike for anomalies), so a degree-day total is less certain than
+its anomaly. Snowfall also depends on the rain-snow ramp (`t_snow`,
+`t_rain`) and the new-snow density formula (M).
+
+## 5. Checking and validating it
+
+- **Stations.** Compare the catchment series with nearby SNOTEL and
+  GHCN-Daily/coop stations (the live tests' probes P03 and P04 show both
+  are reachable): absolute temperatures will differ by elevation, but
+  anomalies should correlate closely.
+- **Sampling.** For a few large catchments, rerun with `n_max = 500` (close
+  to every pixel): the change in the catchment mean should be within about
+  two `tmean_se_sampling`.
+- **Daymet error for Alaska.** The Daymet V4 station cross-validation files
+  (ORNL DAAC) give interpolation error at Alaska stations; not yet in the
+  package.
+
+## 6. Pitfalls
+
+- Daymet years have 365 days (31 December is dropped in leap years).
+- The interpolation error is not in the SEs.
+- Snowfall depends on the rain-snow ramp (`t_snow`, `t_rain`) and the
+  new-snow density formula.
+
+## References
+
+- Hedstrom, N. R. and Pomeroy, J. W. (1998). Measurements and modelling of snow interception in the boreal forest. Hydrological Processes 12, 1611-1625.
+- Thornton, P. E. et al. (2021). Gridded daily weather data for North America with comprehensive uncertainty quantification. Scientific Data 8, 190. Data: doi:10.3334/ORNLDAAC/1840.

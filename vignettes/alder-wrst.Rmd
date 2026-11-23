@@ -1,0 +1,116 @@
+---
+title: "Alder cover: NPS Wrangell-St. Elias land cover"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Alder cover: NPS Wrangell-St. Elias land cover}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Alder cover for Wrangell-St. Elias catchments from the NPS WRST Land Cover
+Mapping Project (Geographic Resource Solutions and ABR, 2004-2007; 28.5 m;
+NPS DataStore 2171667), for the southern catchments outside the ACCS alder
+map (`vignette("alder-accs")`). Its 10,062 spectral signatures carry cover
+attributes from field and aerial-photo plots; `ak_alder(source = "nps_wrst")` averages
+their alder cover over each catchment. Columns are prefixed `alnus_wrst_`,
+so they sit beside the ACCS columns for calibration.
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic, once: the detailed vegetation package is downloaded from the NPS
+DataStore into the cache's `nps_wrst_veg/` folder and unpacked (nested
+zips included); the cells per signature are counted once and saved
+(`signature_cells.csv`). Redistribution terms are not stated by NPS:
+confirm before sharing derived tables.
+
+```{r prefetch, eval = FALSE}
+ak_prefetch(x, layers = "alder/nps_wrst")
+```
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")   # one catchment
+ak_alder(d, source = "nps_wrst")                            # one catchment
+
+x <- ak_catchments(pts)                                  # many: data frame of site_code, lat, lon
+x <- ak_alder(x, source = "nps_wrst")                       # columns appended to x, provenance recorded
+ak_provenance(x)
+
+ak_alder(sf::read_sf("hand_catchments.gpkg"), source = "nps_wrst")   # your own polygons
+```
+
+`unrecorded = "class_mean"` (default) or `"zero"` sets alder for
+signatures whose plots recorded life forms only (section 4).
+
+## 3. What you get
+
+`site_code`, `alnus_wrst_cover`, `alnus_wrst_coverage_pct`,
+`alnus_wrst_cover_se`, `alnus_wrst_cover_lo95`, `alnus_wrst_cover_hi95`,
+`alnus_wrst_unrecorded_pct` (share of the mapped area whose alder comes
+from class means, or is 0), `alnus_wrst_cover_flag` (`outside_map`,
+`partial_coverage`, `error_exceeds_cover`).
+
+## 4. Uncertainty: how it is computed
+
+The ACCS map stops at about
+61-61.8 N, so much of southern Wrangell-St. Elias has no value. The NPS
+WRST land cover map (2004-2007, 28.5 m) covers the whole park. Its 10,062
+spectral signatures carry cover attributes from field and aerial-photo
+plots; `ak_alder(source = "nps_wrst")` averages their alder cover over the catchment.
+Aerial-photo plots recorded life forms only, so about half the mapped area
+has no alder by species: `unrecorded = "class_mean"` gives it the class's
+mean from plots that did record it (`alnus_wrst_unrecorded_pct` says how
+much), `"zero"` sets it to 0. Each signature's error is the SD of alder
+among recorded signatures of its class; errors are independent between
+signatures and shared by every pixel of one, so the catchment SE is exact.
+Misclassification, source-wide bias and change since 2004-2007 are not in
+it: calibrate against ACCS where both maps exist and carry the calibration
+error into the sites that only have the NPS value.
+
+## 5. Checking and validating it
+
+The map is a different product, years and method from ACCS, so it is used
+by **calibrating it against ACCS** where both exist, then predicting
+ACCS-scale alder at the southern sites. Look at the overlap first (live
+tests P08 and H09 report it):
+
+```{r calibrate, eval = FALSE}
+both <- x |> ak_alder() |> ak_alder(source = "nps_wrst") |>    # the two products' columns differ
+  sf::st_drop_geometry() |>
+  dplyr::filter(alnus_coverage_pct >= 90, alnus_wrst_coverage_pct >= 90)
+cor(both$alnus_cover, both$alnus_wrst_cover)          # weak correlation: not worth calibrating
+plot(alnus_cover ~ alnus_wrst_cover, both)
+south <- ak_alder(x, source = "nps_wrst") |> dplyr::filter(!site_code %in% both$site_code)
+range(south$alnus_wrst_cover)                         # beyond the overlap range = extrapolation
+```
+
+Fit the calibration with error in both variables (both columns have SEs),
+in your analysis rather than in the package: it is a modelling choice.
+Compare `unrecorded = "class_mean"` with `"zero"`: if conclusions change,
+the unrecorded share is driving them.
+
+## 6. Pitfalls
+
+- About half the mapped area usually has no species-level alder record:
+  check `alnus_wrst_unrecorded_pct`.
+- 2004-2007 imagery; alder has expanded since, so expect an offset against
+  ACCS.
+- Coastal Sitka alder and interior alder are one signal here.
+- Misclassification is not in the SE (no accuracy assessment was found).
+
+## References
+
+- Geographic Resource Solutions and ABR Inc. (2008). Wrangell-St. Elias National Park and Preserve land cover mapping project. NPS DataStore 2171667.

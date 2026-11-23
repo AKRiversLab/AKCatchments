@@ -1,0 +1,183 @@
+---
+title: "Climate projections: SNAP downscaled CMIP6"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Climate projections: SNAP downscaled CMIP6}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Projected change in monthly and seasonal temperature and precipitation for
+each catchment, model and emissions scenario, from SNAP's (Scenarios
+Network for Alaska + Arctic Planning, University of Alaska Fairbanks)
+daily CMIP6 downscaling: 4 km, 1965-2100, bias-adjusted by quantile delta
+mapping against WRF-downscaled ERA5; up to 13 models and four SSP
+scenarios (`ak_climate_projection_models()`). `source = "snap_cmip6_4km"` is the only
+source so far.
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic: SNAP's rasdaman server is queried directly, one request per
+variable, model, run and block of nearby catchments, and the monthly mean
+of each 4 km cell is cached in `snap_cmip6/` (one file per variable,
+model and run), so other catchments in the same cells and a shared cache
+reuse it. Requests are 1-5 MB; a default run for a few hundred catchments
+is hundreds of requests and can take hours. A progress bar counts the
+coverages (variable x model x run); with mirai daemons running they are
+fetched in parallel (`?ak_parallel`; 4-6 daemons is plenty for one
+server). Failed coverages are reported in `attr(, "failed")`, not fatal.
+
+```{r models}
+m <- ak_climate_projection_models()
+head(m)
+table(m$scenario[m$var == "tasmax" & m$model != "7ModelAvg"])
+```
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")
+dl <- ak_climate_projection(d, scenarios = c("ssp245", "ssp585"),
+                            periods = list(`2041-2070` = 2041:2070, `2071-2100` = 2071:2100))
+ens <- projection_ensemble(dl)                        # long: site x variable x scenario x period x season
+
+seasons <- c(ak_seasons(), nov_mar = list(c(11, 12, 1, 2, 3)))   # e.g. your winter precipitation window
+dl <- ak_climate_projection(d, seasons = seasons, keep_series = TRUE)
+
+x <- ak_catchments(pts)
+dl <- ak_climate_projection(x, seasons = ak_seasons(months = FALSE)[c("annual", "jja", "djf")],
+                            periods = list(`2041-2070` = 2041:2070))   # per-model table (for propagating model spread)
+x <- catchment_join(x, projection_ensemble(dl, wide = TRUE))          # ensemble columns: cmip6_dtmean_jja_ssp245_2041_2070, ...
+```
+
+Applying the change to an observed baseline:
+
+```{r apply, eval = FALSE}
+x <- ak_climate_normals(x, vars = "tmean", periods = "07")         # prism_tmean_07
+fut <- dl |>
+  dplyr::filter(var == "tmean", season == "m07", scenario == "ssp245") |>
+  dplyr::left_join(sf::st_drop_geometry(x)[c("site_code", "prism_tmean_07")], by = "site_code") |>
+  dplyr::mutate(jul_tmean_future = prism_tmean_07 + delta)   # one value per model: keep them all
+```
+
+## 3. What you get
+
+`ak_climate_projection()`, a table with one row per site, variable (`tasmax`, `tasmin`, `tmean`,
+`pr`), scenario, model, period and season: `baseline_mean`,
+`future_mean`, `delta` (°C, or mm for the season), `delta_se`, `ratio` and
+`log_ratio_se` (precipitation), `n_base`, `n_fut`, `n_eff_base`,
+`n_eff_fut`, `delta_local_sd`, `n_cells`, `coverage_pct`, `subgrid`.
+
+`projection_ensemble()`: `n_models`, `delta`, `delta_se` (between-model SD),
+`delta_lo95`, `delta_hi95`, `delta_min`, `delta_max`, `pct`, `pct_se`,
+`pct_lo95`, `pct_hi95` (precipitation), `internal_se`, `sign_agree`,
+`delta_local_sd`, `n_cells`, `coverage_pct`, `flag`.
+
+`projection_ensemble(dl, wide = TRUE)`, one row per site for
+`catchment_join()`: `cmip6_dtmean_<season>_<scenario>_<period>` and
+`cmip6_pr_pct_...` with `_se`, `_lo95`, `_hi95`, `_nmodels`, `_flag`, for
+every season, scenario and period in `dl` (so choose them in
+`ak_climate_projection()`: each combination is five columns).
+
+## 4. Uncertainty: how it is computed
+
+**What is delivered: change, not climate.** SNAP bias-adjusted each model
+by quantile delta mapping against WRF-downscaled ERA5, not Daymet, so
+absolute projected values differ from the Daymet normals and anomalies
+used elsewhere. `ak_climate_projection()` therefore returns each model's change
+relative to its own baseline (`delta` in °C or mm; `ratio` for
+precipitation), to be added to (or multiplied into) your observed
+baseline. Differences between the reference and Daymet cancel; so do each
+model's own biases, to first order.
+
+**Sources of uncertainty, and where each goes.**
+
+| source | handled by | column |
+|---|---|---|
+| scenario (emissions) | kept separate, never averaged | `scenario` |
+| model structure | spread across models | `delta_se` (ensemble SD), `delta_lo95`/`hi95`, `delta_min`/`max` |
+| internal variability (one run per model) | SE of the difference of two 30-year means | per model `delta_se`, `log_ratio_se`; ensemble `internal_se` |
+| spatial: catchment smaller than a 4 km cell | flagged; local spread of the change measured | `subgrid`, `delta_local_sd`, `local_gradient` |
+| downscaling and bias adjustment | not quantified | — |
+
+*Internal variability.* With interannual SD s and n years in each period,
+SE(Δ) = √(s²_f / n_eff,f + s²_b / n_eff,b), where
+n_eff = n (1 − r₁)/(1 + r₁) and r₁ is the lag-1 autocorrelation of the
+linearly detrended season-year series (0 if negative). Precipitation is
+handled on the log scale: SE(log R) = √(CV²_f / n_eff,f + CV²_b / n_eff,b).
+A unit test checks this SE against the spread of simulated differences.
+
+*Model spread.* Models are an ensemble of opportunity: not independent
+(several share components), not a random sample. The ensemble SD is a
+guide to structural uncertainty, not a probability. The 95% limits are a
+prediction interval for one more model treated as exchangeable,
+mean ± t₀.₉₇₅,ₙ₋₁ · SD · √(1 + 1/n), which is wider than the range when
+there are few models; `few_models` flags fewer than 5. The model's sampling
+noise is already part of the spread; `noise_dominated` flags where it is
+at least half of it (common for seasonal precipitation).
+
+*Sub-grid catchments.* Most CAKN catchments are smaller than a 4 km cell.
+Absolute climate varies strongly within a cell (elevation), but the
+*change* varies little, which is why deltas are the product. The SD of
+the per-cell change over the catchment's cells and their eight neighbours
+(`delta_local_sd`) measures how much the change varies at that scale;
+`local_gradient` flags where it exceeds half the ensemble SD.
+
+**Downstream.** For posterior predictions under future climate, push each
+model's delta (the per-model table from `ak_climate_projection()`) through the
+fitted model, so the model spread propagates; using the ensemble mean
+alone hides it. Keep scenarios separate.
+
+**Alternatives.** Kim et al. (2025) provide 10 km daily downscaling of 23
+CMIP6 models for Alaska with several bias-correction methods (an ensemble
+over methods as well as models); SNAP's 12 km CMIP6 indicators and its
+dynamically downscaled WRF runs are other options. The between-product
+spread would add the downscaling uncertainty not included here.
+
+## 5. Checking and validating it
+
+- **Baseline against observations.** `baseline_mean` is the downscaled
+  models' own 1991-2020 climate, built on ERA5-WRF. It won't equal Daymet
+  or PRISM, but across sites it should correlate closely with them; a
+  site far off the line is a cell or orientation problem, not climate:
+
+```{r check, eval = FALSE}
+b <- dl |> dplyr::filter(var == "tmean", season == "m07") |>
+  dplyr::summarise(snap_jul = mean(baseline_mean), .by = site_code)
+dplyr::inner_join(b, sf::st_drop_geometry(ak_climate_normals(x, vars = "tmean", periods = "07")), by = "site_code") |>
+  with(plot(prism_tmean_07, snap_jul))
+```
+
+- **Historical trend.** With `keep_series = TRUE`, the models' trend over
+  1991-2020 can be compared with Daymet's observed trend; models are not
+  expected to match year to year, only in rate.
+- **Requests.** Check `attr(dl, "failed")` and the live tests G06-G07,
+  which confirm the server's layout and units.
+
+## 6. Pitfalls
+
+- Use deltas, not absolute projected values.
+- Don't average scenarios; don't use only the ensemble mean downstream.
+- Model availability differs by scenario and variable (CESM2 has
+  precipitation only): `n_models` differs between columns.
+- Most catchments are smaller than a 4 km cell (`subgrid`).
+
+## References
+
+- Cannon, A. J., Sobie, S. R. and Murdock, T. Q. (2015). Bias correction of GCM precipitation by quantile mapping. Journal of Climate 28, 6938-6959.
+- Eyring, V. et al. (2016). Overview of the Coupled Model Intercomparison Project Phase 6 (CMIP6). Geoscientific Model Development 9, 1937-1958.
+- Kim, T. et al. (2025). Ensemble downscaled climate dataset for Alaska and Hawaii under historical and future conditions. Scientific Data 12, 1089.
+- Lavoie, J. et al. (2024). ESPO-G6-R2: bias-adjusted CMIP6 simulations for North America. Scientific Data, doi:10.1038/s41597-023-02855-z.
+- SNAP CMIP6 downscaling code: https://github.com/ua-snap/cmip6-downscaling.

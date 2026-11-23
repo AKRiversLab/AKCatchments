@@ -1,0 +1,232 @@
+---
+title: "Rock chemistry: nitrogen, sulfur and major oxides from lithology (Olson & Hawkins on SIM 3340)"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Rock chemistry: nitrogen, sulfur and major oxides from lithology (Olson & Hawkins on SIM 3340)}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+The expected whole-rock content of nitrogen, sulfur and the major oxides
+(SiO2, Al2O3, Fe2O3, CaO, MgO, Na2O, K2O, P2O5) under each catchment, as a
+continuous exposure with its uncertainty. It joins two products:
+
+- the **lithologies of each map unit** of the Geologic Map of Alaska
+  (Wilson et al. 2015, USGS SIM 3340), with a rank saying how much of the
+  unit each lithology makes up (`vignette("geology-sim3340")`);
+- the **lithology geochemistry of Olson and Hawkins** (2014 data release,
+  method in Olson and Hawkins 2012): a central value of each element for
+  each lithology class, from EarthChem whole-rock analyses and the
+  literature.
+
+Olson and Hawkins built their CONUS rasters (the rock %N and oxide layers
+behind StreamCat) the same way, from the CONUS state geologic map
+databases. SIM 3340 comes from the same USGS integrated geologic map
+database series, with the same lithology hierarchy and rank scheme, so
+their method carries over map unit by map unit. To our knowledge it had not
+been applied to Alaska: their products are built on NHDPlusV2, which
+covers only the conterminous US.
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic, once, into the cache:
+
+- the SIM 3340 geodatabase (`ak_geology/`, shared with `ak_geology()`);
+- two workbooks from the Olson and Hawkins data release
+  (doi:10.5066/F7X0653P), into `olson_lithology/`:
+  - **Lith-Nutrient**: N and S, 284 lithology classes;
+  - **Lith-MajorOxides**: the eight oxides, 279 classes.
+
+  Each has a "Lith Summary" tab (one central value per class) and one tab
+  per class listing every source record and whether the class value is a
+  mean or a median.
+
+```{r prefetch, eval = FALSE}
+ak_prefetch(x, layers = "rock_chemistry/olson2014")
+```
+
+**Audit the class values first.** Rock N needs dedicated analyses and is
+rarely part of standard whole-rock geochemistry, so many classes rest on
+few records:
+
+```{r audit, eval = FALSE}
+lt <- rock_chem_lithologies(c("N", "S", "CaO", "MgO", "P2O5"))
+lt |> dplyr::filter(element == "N") |> dplyr::arrange(n)     # records per class, sparse first
+lt |> dplyr::filter(element == "N", is.na(tab))              # classes whose records tab wasn't found
+```
+
+`n` and `sdlog` come from the per-class tabs. The workbooks' layout is not
+documented, so the parser finds columns by their headers. `parse_note` and
+`tab` show what it could not match; live test H12 writes the full audit.
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")
+ak_rock_chem(d)                                  # rock N (default), one catchment
+
+x <- ak_catchments(pts) |>
+  ak_rock_chem(element = c("N", "S", "CaO", "MgO", "P2O5"), n = 1000)   # columns appended
+
+# the crosswalk: which SIM 3340 terms matched which class, and the template for modifiers
+cw <- rock_chem_crosswalk(x, "N", file = "rock_modifiers.csv")
+cw |> dplyr::count(status)                       # ok, sparse class, no matching class, class has no value
+# ... fill modifier_class and rationale in rock_modifiers.csv from the Description of Map Units ...
+x <- ak_rock_chem(x, "N", modifiers = "rock_modifiers.csv")
+
+# sensitivity checks
+ak_rock_chem(x, "N", surficial = "exclude")      # without the mapped surficial deposits
+ak_rock_chem(x, "N", formation_sd = 0.5)         # half the record spread as formation-to-formation
+ak_rock_chem(x, "N", rank_shares = list(major = c(50, 100), minor = c(10, 50), incidental = c(0, 10),
+                                        indeterminate = c(10, 100)))
+```
+
+## 3. What you get
+
+For each element `<el>` (`N`, `S`, `CaO`, ...), in percent of rock mass:
+
+- `rock<el>_pct`: the plug-in estimate (class values, rank midpoints), the
+  same as Olson and Hawkins's rasters would give;
+- `rock<el>_pct_se`, `_lo95`, `_hi95`: from the draws (right-skewed);
+- `rock<el>_na_frac`: the share of the mapped area on lithologies without a
+  value (not rock types, or no matching class);
+- `rock<el>_sparse_frac`: the share of the characterised weight from classes
+  with fewer than `min_n` (5) records;
+- `rock<el>_coarsened_frac`: the share matched only at a more general term;
+- `rock<el>_modifier_frac`: the share whose class was assigned by hand;
+- `rock<el>_flag`.
+
+Shared columns: `rock_surficial_frac` (the share in units made only of
+unconsolidated deposits) and `rock_mapped_pct`. `details = TRUE` adds the
+crosswalk and the map-unit values with their SD.
+
+## 4. Uncertainty: how it is computed
+
+**The match.** Each lithology of a map unit (SIM 3340 table NSALith,
+`LITH1` to `LITH5` from general to specific) is matched to an Olson class
+by its most specific term. When that term is not a class, the next more
+general term is tried and the match counts as coarsened: "Siltstone" not
+found becomes "Clastic". Olson and Hawkins added 83 modifier classes for
+N and S (78 for the oxides), such as carbonaceous vs. non-carbonaceous
+shale, read from formation descriptions. SIM 3340 has no modifier field,
+so those are assigned by hand (`modifiers`). For CAKN that means only the
+units that intersect the catchments: dozens, not thousands. Log the
+rationale for each assignment in the file.
+
+**Prevalence within a unit.** SIM 3340's ranks are defined as shares of
+the unit: Major at least 33%, Minor 10-33%, Incidental under 10%.
+Indeterminate is taken as 10-100%. The point estimate uses each range's
+midpoint, normalised within the unit; the draws pick a share uniformly
+within each range and normalise again:
+
+```{r ranks}
+ranges <- list(major = c(33, 100), minor = c(10, 33), incidental = c(0, 10))
+unit <- c("major", "minor", "minor")                 # e.g. phyllite (major), schist and marble (minor)
+mid <- sapply(ranges[unit], mean)
+round(mid / sum(mid), 2)                             # point weights
+set.seed(1)
+w <- t(replicate(5, { s <- sapply(ranges[unit], \(r) runif(1, r[1], r[2])); s / sum(s) }))
+round(w, 2)                                          # five draws
+```
+
+**Class values.** Rock N within one lithology spans orders of magnitude.
+It depends on organic matter, on ammonium substituted for potassium in
+micas and feldspars, and on metamorphic grade: devolatilisation removes N,
+so a high-grade schist has lost much of what a low-grade one keeps. A
+class value is therefore a rough guess for any one formation. Each draw
+combines:
+
+- **the class mean**: a shift on the log scale with SD `sdlog/sqrt(n)`
+  (how well the class mean is known), shared by every unit of that class;
+- **the formation**: a lognormal deviation with SD
+  `formation_sd x sdlog`, mean-preserving, for how far this formation's
+  rock may sit from its class mean. With `formation_sd = 1` (default),
+  all of the spread among records is treated as differences between
+  formations. That is conservative: part of it is variation within a
+  formation, which averages out over a catchment.
+
+`sdlog` is the SD of the log values among a class's records. A class with
+fewer than five records, or with a value but no records found, gets the
+90th percentile of `sdlog` among the element's well-sampled classes, so
+thin classes carry wide intervals. A map unit draws once per draw, and
+every catchment on that unit shares that draw, so errors between
+neighbouring catchments are correlated, as they are in reality.
+
+```{r spread}
+# what an sdlog of 1 means for a class value of 0.05 % N: the middle 95% of formations
+0.05 * exp(-1 / 2 + c(-1.96, 0, 1.96))
+```
+
+**Not included:**
+
+- the placement of map boundaries (1:1,584,000; see
+  `positional_uncertainty()` and `vignette("geology-sim3340")`);
+- lithologies listed wrongly for a unit;
+- whether CONUS rocks of a class represent Alaskan rocks of the same name.
+
+That last one is the largest unknown. Live test H12 reports how many Alaska
+terms match at all.
+
+## 5. Checking and validating it
+
+- **Vocabulary.** In `rock_chem_crosswalk()`, every `no matching class` row
+  is a SIM 3340 term that is not an Olson class name. A few are expected
+  (spelling, Alaska-only terms); many would mean the vocabularies differ
+  and the match needs a hand-made table. `coarsened` rows show how much
+  rests on general terms.
+- **Against CONUS.** The CONUS rasters (StreamCat's rock %N) give the
+  distribution of map-unit values for similar terrains; Alaska's should
+  fall in the same range.
+- **Stream chemistry.** Within reference catchments, stream nitrate should
+  covary with K and sulfate where rock N is high, if N is released by
+  weathering of N-rich sedimentary rocks (ammonium in micas; pyrite in
+  carbonaceous shales). Pair this with the oxide exposures, because plain
+  lithology differences produce the same co-variation.
+
+## 6. Pitfalls
+
+- **Measurement error attenuates.** A class average for a lithology whose
+  rocks vary by orders of magnitude is classical measurement error: a
+  regression on `rockN_pct` is biased toward zero, and a null result is weak
+  evidence. Model rock N as latent, with `rockN_pct_se` as known error.
+- **Concentration is not supply.** Rock N reaches streams only through
+  weathering and erosion (Houlton et al. 2018), so the prediction is rock N
+  × erosion or runoff, not a main effect. Glacial erosion, permafrost and
+  loess cover all modify it in Alaska.
+- **Surficial cover.** Till, loess and alluvium of mixed provenance cover
+  much of interior Alaska. As mapped, those units get their deposits'
+  values (from CONUS deposits of the same name). Report
+  `surficial = "exclude"` as the sensitivity, and keep `rock_surficial_frac`
+  in the model.
+- **Scale.** At 1:1,584,000 a small catchment can sit on a unit that isn't
+  there on the ground, and the map can act as an indicator of park or
+  region. Compare within regions.
+- **Soil N is downstream of rock N.** Adjusting for soil N blocks the
+  pathway from rock to stream; for the total effect of rock N, don't.
+- **Other rock properties.** Lithology also sets fertility, carbonate
+  weathering and permeability. The oxides from the same pipeline (CaO,
+  MgO, P2O5) and S are the placebo exposures: rock N should predict stream
+  N beyond them.
+- `ak_geology()`'s pattern columns (`geol_contains_pct_carbonaceous`,
+  `_black_shale`, ...) remain as categorical exposures; keep both for
+  comparison.
+
+## References
+
+- Houlton, B. Z., Morford, S. L. and Dahlgren, R. A. (2018). Convergent evidence for widespread rock nitrogen sources in Earth's surface environment. Science 360, 58-62.
+- Morford, S. L., Houlton, B. Z. and Dahlgren, R. A. (2011). Increased forest ecosystem carbon and nitrogen storage from nitrogen rich bedrock. Nature 477, 78-81.
+- Olson, J. R. and Hawkins, C. P. (2012). Predicting natural base-flow stream water chemistry in the western United States. Water Resources Research 48, W02504, doi:10.1029/2011WR011088.
+- Olson, J. R. and Hawkins, C. P. (2014). Geochemical characteristics of the conterminous United States. USGS data release, doi:10.5066/F7X0653P.
+- Wilson, F. H. et al. (2015). Geologic map of Alaska. USGS Scientific Investigations Map 3340, doi:10.3133/sim3340.

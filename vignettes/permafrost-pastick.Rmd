@@ -1,0 +1,92 @@
+---
+title: "Near-surface permafrost probability: Pastick et al. 2015"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Near-surface permafrost probability: Pastick et al. 2015}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Catchment summaries of the 30 m probability of permafrost within 1 m of the
+surface (Pastick et al. 2015; USGS data release doi:10.5066/F7C53HX6;
+about 2001-2010), an alternate to the Jorgenson extent classes
+(`vignette("permafrost-jorgenson")`). Values 0-100 are probabilities;
+101-105 are masked NLCD 2001 classes (water, ice and snow, developed,
+barren, cultivated).
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic, once: a 7-Zip archive (777 MB, holding a `.tar`) from
+ScienceBase into the cache's `pastick_2015/` folder. Unpacking needs the
+`archive` R package or a 7z program; archives found inside are unpacked in
+place and deleted, so a cache left with only the `.tar` recovers without
+downloading again.
+
+```{r prefetch, eval = FALSE}
+ak_prefetch(x, layers = "permafrost/pastick2015")
+```
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")   # one catchment
+ak_permafrost(d, source = "pastick2015")                  # one catchment
+
+x <- ak_catchments(pts)                                  # many: data frame of site_code, lat, lon
+x <- ak_permafrost(x, source = "pastick2015")              # columns appended to x, provenance recorded
+ak_provenance(x)
+
+ak_permafrost(sf::read_sf("hand_catchments.gpkg"), source = "pastick2015")   # your own polygons
+```
+
+## 3. What you get
+
+`pf_prob_mean` (mean probability over the vegetated part), `pf_extent_pct`
+(share above 50%), `pf_land_lo` / `pf_land_hi` (permafrost over all
+non-glacier, non-water land with masked land counted as none / all
+permafrost), `pf_masked_pct`, `pf_icesnow_pct`, `pf_barren_pct`,
+`pf_coverage_pct`, `pf_flag` (`partial_coverage` under 90% mapped,
+`mostly_masked` over 25% masked).
+
+## 4. Uncertainty: how it is computed
+
+**Product error.** About 85% accuracy at the 50% threshold, likely lower
+for small areas; no per-pixel error layer. Errors are correlated within a
+catchment, so no SE is given.
+
+**What is reported.** `pf_prob_mean` (mean probability over the vegetated
+part: the expected permafrost fraction if the probabilities are
+calibrated), `pf_extent_pct` (share above 50%: more sensitive to
+misclassification near the threshold), and bounds `pf_land_lo` /
+`pf_land_hi` treating masked land (barren, developed) as none or all
+permafrost. `pf_flag` marks partial coverage and mostly masked catchments.
+
+## 5. Checking and validating it
+
+Compare with Jorgenson (see `vignette("permafrost-jorgenson")`, section
+5), and check `pf_masked_pct`: in glaciated and rocky WRST catchments much
+of the area is masked, and `pf_prob_mean` then describes a small vegetated
+part. The bounds `pf_land_lo`-`pf_land_hi` say how much that matters.
+
+## 6. Pitfalls
+
+- It is a model output whose predictors include climate, terrain and
+  vegetation: in a causal analysis it sits downstream of them.
+- Static (~2001-2010): no thaw since.
+- Within 1 m only: the layer for shallow flow paths, not deep permafrost.
+
+## References
+
+- Pastick, N. J. et al. (2015). Distribution of near-surface permafrost in Alaska: estimates of present and future conditions. Remote Sensing of Environment 168, 301-315. Data: doi:10.5066/F7C53HX6.

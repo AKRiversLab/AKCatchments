@@ -1,0 +1,81 @@
+test_that("a synthetic basin is delineated, flagged and plotted", {
+  skip_if_not(wbt_available(), "WhiteboxTools not installed")
+  withr_cache <- withr_tmp <- tempfile("akcache_")
+  old <- options(AKCatchments.cache = withr_cache)
+  on.exit(options(old), add = TRUE)
+  s <- synthetic_dem(tempfile("dem_synth_"))
+  ll <- xy_to_ll(s$x0 + 60, s$y0 + 200)
+  out <- tempfile("plots_")
+  d <- ak_delineate(ll[2], ll[1], site_code = "SYN-1", dem_source = "local", dem_dir = s$dir,
+                    start_buffer_m = 5000, max_buffer_m = 10000, flowlines = NULL, plot_dir = out)
+  c1 <- d$catchment
+  expect_s3_class(d, "ak_delineation")
+  expect_false(c1$truncated)
+  expect_true(c1$delin_ok)
+  expect_equal(c1$area_km2, s$area_km2, tolerance = 0.1)
+  expect_lt(abs(sf::st_coordinates(d$snapped)[1, 1] - s$x0), 2 * c1$dem_res_m)
+  expect_gt(c1$snap_dist_m, 30)
+  expect_true(file.exists(d$plot_file))
+  expect_gt(nrow(d$streams), 0)
+  expect_true(all(file.exists(unlist(d$files))))
+})
+
+test_that("keep_rasters = FALSE keeps only the polygon, on its own window or a shared one", {
+  skip_if_not(wbt_available(), "WhiteboxTools not installed")
+  cache <- tempfile("akcache_")
+  old <- options(AKCatchments.cache = cache)
+  on.exit(options(old), add = TRUE)
+  s <- synthetic_dem(tempfile("dem_synth_"))
+  ll <- xy_to_ll(s$x0, s$y0 + 200)
+  args <- list(dem_source = "local", dem_dir = s$dir, start_buffer_m = 10000, max_buffer_m = 10000, flowlines = NULL,
+               plot = FALSE, keep_rasters = FALSE)
+  d <- do.call(ak_delineate, c(list(ll[2], ll[1], site_code = "SYN-K"), args))
+  expect_null(d$files)
+  pts <- data.frame(site_code = c("K1", "K2"), lat = ll[[2]], lon = ll[[1]] + c(0, 0.0005))
+  x <- suppressMessages(do.call(ak_catchments, c(list(pts, regional = TRUE), args)))
+  expect_equal(nrow(x), 2)
+  expect_match(x$window_mode, "^regional")
+  expect_false(any(c("dem_file", "filled_file", "pointer_file", "accum_file") %in% names(x)))
+  expect_false(dir.exists(file.path(cache, "delineation")))
+})
+
+test_that("a known area guides snapping and a wrong one is flagged", {
+  skip_if_not(wbt_available(), "WhiteboxTools not installed")
+  old <- options(AKCatchments.cache = tempfile("akcache_"))
+  on.exit(options(old), add = TRUE)
+  s <- synthetic_dem(tempfile("dem_synth_"))
+  ll <- xy_to_ll(s$x0, s$y0 + 200)
+  d <- ak_delineate(ll[2], ll[1], site_code = "SYN-2", ref_area_km2 = 60, dem_source = "local", dem_dir = s$dir,
+                    start_buffer_m = 10000, max_buffer_m = 10000, flowlines = NULL, plot = FALSE)
+  expect_equal(d$catchment$snap_method, "ref_area")
+  expect_match(d$catchment$flags, "area_mismatch")
+  expect_false(d$catchment$delin_ok)
+})
+
+test_that("ak_catchments records failures without stopping", {
+  skip_if_not(wbt_available(), "WhiteboxTools not installed")
+  old <- options(AKCatchments.cache = tempfile("akcache_"))
+  on.exit(options(old), add = TRUE)
+  s <- synthetic_dem(tempfile("dem_synth_"))
+  ll <- xy_to_ll(s$x0, s$y0 + 200)
+  pts <- data.frame(site_code = c("A", "B"), lat = c(ll[2], 10), lon = c(ll[1], 10))
+  res <- suppressMessages(suppressWarnings(ak_catchments(pts, dem_source = "local", dem_dir = s$dir, start_buffer_m = 10000,
+                                                         max_buffer_m = 10000, flowlines = NULL, plot = FALSE)))
+  expect_equal(nrow(res), 1)
+  expect_equal(attr(res, "errors")$site_code, "B")
+})
+
+test_that("topography summarises the delineation DEM", {
+  skip_if_not(wbt_available(), "WhiteboxTools not installed")
+  old <- options(AKCatchments.cache = tempfile("akcache_"))
+  on.exit(options(old), add = TRUE)
+  s <- synthetic_dem(tempfile("dem_synth_"))
+  ll <- xy_to_ll(s$x0, s$y0 + 200)
+  d <- ak_delineate(ll[2], ll[1], site_code = "SYN-3", dem_source = "local", dem_dir = s$dir,
+                    start_buffer_m = 10000, max_buffer_m = 10000, flowlines = NULL, plot = FALSE)
+  t <- ak_topography(d)
+  expect_equal(nrow(t), 1)
+  expect_gt(t$topo_relief_m, 50)
+  expect_true(t$topo_northness < 0)
+  expect_true(all(c("topo_hli", "topo_fws_pct", "topo_aspect_mean_deg") %in% names(t)))
+})

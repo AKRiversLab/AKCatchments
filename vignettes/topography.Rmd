@@ -1,0 +1,156 @@
+---
+title: "Topography and outlet slope (delineation DEM)"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Topography and outlet slope (delineation DEM)}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Elevation, slope, flow-weighted and channel slope, wetness, aspect and heat
+load for each catchment, and the channel gradient just upstream of the
+outlet, all from the DEM the catchment was delineated on (by default the
+Alaska IfSAR 5 m bare-earth model; Copernicus GLO-30 or your own tiles
+otherwise; see `vignette("delineation")`, section 2.2).
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Nothing extra: the DEM window and its conditioned rasters (breached DEM, D8
+pointer and accumulation) are kept by the delineation in the cache's
+`delineation/` folder. For catchments delineated elsewhere (hand-drawn,
+StreamStats), `import_catchments()` fetches a DEM window around each
+polygon (plus `buffer_m`, 500 m) and conditions it once, in the cache's
+`scratch/<site_code>/` folder, and returns the polygons with the raster
+paths, as `ak_catchments()` does.
+
+```{r prep, eval = FALSE}
+hand <- import_catchments(sf::read_sf("hand_catchments.gpkg"), dem_source = "ifsar")
+```
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")
+ak_topography(d)                                   # uses the delineation's own rasters
+ak_outlet_slope(d)                                 # the sample point is in the delineation
+
+x <- ak_catchments(pts) |>
+  ak_topography() |>
+  ak_outlet_slope(reach_m = c(100, 200))           # outlet_* columns; the first reach is the primary
+
+hand |> ak_topography() |> ak_outlet_slope(points = pts)   # your own polygons, after import_catchments()
+ak_topography(hand, dem = terra::rast("my_dem.tif"))      # or one DEM for all of them
+```
+
+## 3. What you get
+
+`ak_topography()`: `topo_*` columns per site: elevation mean, min, max and
+relief; cell slope mean, min and max at the native resolution and the mean
+at 10 m and 30 m (`topo_slope_mean_deg_10m`, `_30m`); flow-weighted slope
+`topo_fws_pct` = Σ(slope % × accumulation) / Σ accumulation (Shaftel et
+al. 2011); `topo_chan_slope_pct` (mean slope of channel cells, contributing
+area ≥ `stream_threshold_km2`); `topo_wetx` (mean ln(a / tan β)); aspect as
+mean northness and eastness with their resultant length; heat load index
+(McCune and Keon 2002); `topo_dem_res_m`; `topo_flag` (`few_cells`, under
+100 cells).
+
+`ak_outlet_slope()`: the walk upstream from the snapped outlet along the
+D8 network, following the neighbour with most flow, with true
+along-channel distance, as `outlet_*` columns: for the first reach length
+`outlet_slope_m_m`, `outlet_slope_deg`, `outlet_elev_drop_m`,
+`outlet_reach_actual_m` and `outlet_reach_complete` (FALSE where a channel
+head came first); for the others `outlet_slope_m_m_<length>`; and
+`outlet_snap_dist_m`, `outlet_contrib_area_km2` against
+`outlet_catch_area_km2`, the stream power index `outlet_spi` = ln(A tan
+slope).
+
+## 4. Uncertainty: how it is computed
+
+**Where error comes from.** The DEM. The Alaska IfSAR terrain model has a
+vertical accuracy of 3 m at 90% confidence (LE90) on 0-10° slopes, an
+RMSE of about 1.8 m, and is less accurate in forest and steep terrain;
+Copernicus GLO-30 is a surface model (canopy included) with absolute
+LE90 better than 4 m and relative (point-to-point) LE90 better than 2 m on
+slopes up to 20%.
+
+**Catchment means** of elevation are insensitive to this: the error is
+small against relief and averages over many cells. **Slope** depends on
+resolution more than on vertical error, which is why `ak_topography()`
+also reports mean slope at 10 m and 30 m: the spread between them is the
+scale uncertainty.
+
+**Outlet slope** is the sensitive one. It is a drop over a short reach,
+so the vertical error of the two ends enters directly. If the errors at
+the two ends have SD σ and correlation ρ, the slope's SE is
+√(2(1 − ρ)) σ / L:
+
+```{r slope-se}
+sigma <- 3 / qnorm(0.95)                     # IfSAR: 3 m LE90 -> SD about 1.8 m
+expand.grid(reach_m = c(100, 200), rho = c(0, 0.5, 0.9)) |>
+  transform(slope_se = round(sqrt(2 * (1 - rho)) * sigma / reach_m, 4))
+```
+
+With independent errors the SE over 100 m is about 0.026 m/m, as large as
+many channel gradients; DEM errors 100 m apart are correlated, so the real
+value is smaller, but unknown. The package reports two reach lengths
+(`outlet_slope_m_m`, `outlet_slope_m_m_200`) so the sensitivity is visible:
+where they disagree by more than a factor of two, the slope is not well
+determined. The snap enters too: `outlet_snap_dist_m` and
+`outlet_contrib_area_km2` against `outlet_catch_area_km2` say whether the
+walk started on the right channel.
+
+**Alternatives.** Slope from a smoothed DEM, from the 3DHP flowline's
+vertex elevations, or a longer reach (less noise, less local). Each
+answers a slightly different question; report which.
+
+## 5. Checking and validating it
+
+- **DEM choice.** Delineate a few sites from both DEMs and compare: live
+  test D03 found Copernicus within 1.4 m (mean) and 2.4 m (RMS) of IfSAR at
+  the Little Susitna gage and an IoU of 0.99 between the two catchments.
+  Elevation means should differ by about the mean bias; slopes more,
+  because Copernicus is 30 m and a surface model.
+
+```{r dem-compare, eval = FALSE}
+cop <- ak_catchments(pts, dem_source = "copernicus")
+dplyr::inner_join(sf::st_drop_geometry(ak_topography(x)), sf::st_drop_geometry(ak_topography(cop)),
+                  by = "site_code", suffix = c("_ifsar", "_cop")) |>
+  dplyr::transmute(site_code, d_elev = topo_elev_mean_m_ifsar - topo_elev_mean_m_cop,
+                   d_slope = topo_slope_mean_deg_ifsar - topo_slope_mean_deg_cop)
+```
+
+- **Scale.** The 10 m and 30 m slope means show how much of the slope is
+  resolution; if your analysis compares sites on different DEMs, use the
+  coarser one for all.
+- **Outlet slope.** Compare the 100 m and 200 m reaches; where field reach
+  slopes (surveyed or from a GPS profile) exist, compare with those. Check
+  the plot where `snap_dist_m` is large or `contrib_area_km2` differs much
+  from `catch_area_km2`: the walk may be on another channel.
+
+## 6. Pitfalls
+
+- Copernicus is a surface model: in forest, "elevation" includes the
+  canopy, which flattens valley floors and biases channel slopes.
+- `topo_wetx` and channel slope depend on the channel threshold
+  (`stream_threshold_km2`); keep it fixed across sites.
+- Outlet slope on a coarse DEM (`elevatr`) is rough at best.
+- Catchments under about 0.0025 km² on a 5 m DEM have under 100 cells
+  (`few_cells`); most statistics are then noisy.
+
+## References
+
+- McCune, B. and Keon, D. (2002). Equations for potential annual direct incident radiation and heat load. Journal of Vegetation Science 13, 603-606.
+- Shaftel, R. S., King, R. S. and Back, J. A. (2011). Alder cover drives nitrogen availability in Kenai lowland headwater streams, Alaska. Biogeochemistry 107, 135-148.
+- USGS EROS: Alaska IfSAR DTM accuracy (3 m LE90, 12.2 m CE90); Copernicus DEM product handbook (GLO-30 accuracy).

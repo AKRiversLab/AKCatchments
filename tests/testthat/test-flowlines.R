@@ -1,0 +1,33 @@
+test_that("flowline files are chosen from the level-2 units the area touches", {
+  sq <- \(x0, y0) sf::st_polygon(list(cbind(c(x0, x0 + 10, x0 + 10, x0, x0), c(y0, y0, y0 + 5, y0 + 5, y0))))
+  index <- sf::st_sf(HYBAS_ID = c(8020000010, 7020000010, 7020046500), PFAF_ID = c(81L, 71L, 78L),
+                     geometry = sf::st_sfc(sq(-160, 60), sq(-150, 60), sq(-140, 40), crs = 4326))
+  aoi <- sf::st_bbox(c(xmin = -150.5, ymin = 62, xmax = -149.5, ymax = 63), crs = 4326)
+  u <- AKCatchments:::flowline_units(aoi, index)
+  expect_setequal(u$PFAF_ID, c(81L, 71L))
+  dir <- tempfile()
+  tdx <- AKCatchments:::flowline_plan(u, "tdx", dir)
+  expect_true(all(grepl("download.php\\?file=[78]020000010-streamnet-gpkg$", tdx$url)))
+  expect_true(all(grepl("TDX_streamnet_[78]020000010_01.gpkg$", tdx$file)))
+  expect_false(any(tdx$exists))
+  merit <- AKCatchments:::flowline_plan(u, "merit", dir)
+  expect_setequal(basename(merit$file), c("rivers81.db", "rivers71.db"))
+  hr <- AKCatchments:::flowline_plan(u, "hydrorivers", dir)
+  expect_setequal(hr$unit, c("ar", "na"))
+  expect_error(AKCatchments:::flowline_units(sf::st_bbox(c(xmin = 10, ymin = 10, xmax = 11, ymax = 11), crs = 4326), index))
+})
+
+test_that("a zipped download is unpacked in place and a line layer is read", {
+  dir <- tempfile(); dir.create(dir)
+  l <- sf::st_sf(id = 1:2, geometry = sf::st_sfc(sf::st_linestring(rbind(c(0, 0), c(1000, 1000))),
+                                                 sf::st_linestring(rbind(c(5e5, 5e5), c(5e5 + 10, 5e5 + 10))), crs = 3338))
+  g <- file.path(dir, "inner.gpkg")
+  sf::st_write(l, g, quiet = TRUE)
+  f <- file.path(dir, "TDX_streamnet_1_01.gpkg")
+  skip_if_not(nzchar(Sys.which("zip")), "no zip program")
+  old <- setwd(dir); utils::zip(f, "inner.gpkg", flags = "-q", zip = Sys.which("zip")); setwd(old)
+  AKCatchments:::unzip_if_zip(f)
+  aoi <- sf::st_as_sfc(sf::st_bbox(c(xmin = -10, ymin = -10, xmax = 2000, ymax = 2000), crs = 3338))
+  x <- AKCatchments:::flowlines_file(aoi, f)
+  expect_equal(x$id, 1L)
+})

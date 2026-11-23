@@ -1,0 +1,51 @@
+Package: AKCatchments
+Type: Package
+Title: Delineate and Characterize Alaska Stream Catchments with Documented Uncertainty
+Version: 0.2.0.9000
+Authors@R: person("Caleb", "Robbins", email = "robbinscalebj@gmail.com", role = c("aut", "cre"))
+Description: Delineates the catchment draining to a stream point anywhere in Alaska
+    from the best available elevation data (by default the statewide 5 m IfSAR
+    bare-earth terrain model), checks each delineation for the failure modes that
+    automated D8 routing is prone to, compares it with reference flowlines,
+    hand-drawn catchments and USGS StreamStats, and always draws it on satellite
+    imagery so it can be checked by eye. Summarises topography, climate, snow,
+    land cover, permafrost, geology, soils, fire history and alder cover for each
+    catchment, carrying the uncertainty of every value in companion columns,
+    with a catalog of layers and alternates and a provenance record for every
+    value added. Observations (stream temperature, USGS daily values, your own
+    chemistry) share one schema and are linked to the catchments.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+Depends:
+    R (>= 4.1)
+Imports:
+    cli,
+    dplyr,
+    exactextractr,
+    ggplot2,
+    httr2,
+    jsonlite,
+    maptiles,
+    parallel,
+    purrr (>= 1.1.0),
+    rlang,
+    sf,
+    terra,
+    tidyr,
+    whitebox
+Suggests:
+    archive,
+    dataRetrieval (>= 2.7.18),
+    carrier,
+    elevatr,
+    knitr,
+    mirai (>= 2.4.0),
+    readxl,
+    rmarkdown,
+    soilDB,
+    testthat (>= 3.0.0),
+    writexl
+Config/testthat/edition: 3
+VignetteBuilder: knitr
+Config/roxygen2/version: 8.1.0

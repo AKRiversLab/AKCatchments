@@ -1,0 +1,218 @@
+---
+title: "A full run: many sites, start to finish, and how to make it fast"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{A full run: many sites, start to finish, and how to make it fast}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+```
+
+This vignette runs the package on a network of sites, from a table of
+sample points to a GeoPackage of catchments with their attributes,
+uncertainty columns and provenance, plus the long tables (daily weather,
+snow-off, projections) that go with them. It says where the time goes,
+what can run in parallel, and what to set. Nothing here is run when the
+vignette is built.
+
+## 1. Where the time goes
+
+| step | function | what limits it | parallel? | recommendation |
+|---|---|---|---|---|
+| DEM window per site | `ak_catchments()` | download (IfSAR service, Copernicus tiles) | yes: sites or windows | `regional = TRUE` for clustered sites; daemons |
+| conditioning (breach, D8) | `ak_catchments()`, `import_catchments()` | CPU (WhiteboxTools) | yes: sites or windows | daemons; WhiteboxTools threads are shared out |
+| watershed, polygon, diagnostics | `ak_catchments()` | CPU, small | with the site | |
+| reference flowlines | `ak_catchments()` | download | with the site | `flowlines = NULL` for a quick first pass |
+| check plot | `ak_catchments()` | imagery download | with the site | `plot = FALSE` for reruns; plot the final set once |
+| statewide maps (land cover, alder, PRISM, Pastick, geology) | layer functions | one large download, then fast | no | `ak_prefetch()` once; extraction is seconds |
+| terrain attributes | `ak_topography()`, `ak_outlet_slope()` | CPU, reading the site's rasters | yes: sites | daemons |
+| positional draws | `ak_permafrost()`, `ak_glaciers()` | CPU (GEOS) | yes: sites | daemons |
+| soils | `ak_soils()` | one web query per site | yes: sites | 4 daemons at most (one server) |
+| fire perimeters | `ak_fire()` | one query for the area | no | cached; `refresh = TRUE` after a fire season |
+| Daymet | `ak_weather()` | hundreds of small requests | concurrent requests | automatic, 4 at a time (`AKCatchments.max_active`) |
+| MODIS snow-off | `ak_snowoff()` | 740 MB per year, once | no | `keep_full = TRUE` on a shared cache |
+| SNAP projections | `ak_climate_projection()` | one request per coverage and block | yes: coverages | 4-6 daemons (one server) |
+| Landsat NDVI | `ak_peak_ndvi()` | thousands of scene reads | yes: groups of nearby catchments | daemons; first run takes hours |
+
+Two things follow. First, delineation and the web-bound layers are limited
+by downloads more than by computing, so more processes help only until
+the server or your connection is the limit: in the November 2026 live
+tests, two processes delineated about 1.4 times as fast as one. Sharing
+DEM windows between nearby sites (`regional = TRUE`) cuts the downloads
+themselves, which helps whatever the number of processes. Second, the
+cache makes every second run fast: point it at a drive with room (or a
+shared folder) once, and prefetch the statewide files.
+
+Every delineation records its step times (`t_dem_s`, `t_condition_s`,
+`t_watershed_s`, `t_finish_s`, `t_flowlines_s`, `t_plot_s`, `t_total_s`),
+so after a first run you can see which step to work on:
+
+```{r timing, eval = FALSE}
+sf::st_drop_geometry(x) |>
+  dplyr::summarise(dplyr::across(dplyr::starts_with("t_"), sum)) |>
+  tidyr::pivot_longer(dplyr::everything(), names_to = "step", values_to = "seconds") |>
+  dplyr::mutate(share = round(seconds / max(seconds), 2))
+```
+
+## 2. Setting up parallel processing
+
+The package uses the mirai package through `purrr::in_parallel()`. You
+start the background processes ("daemons"); every per-site loop in the
+package then uses them, and runs in this session when there are none. The
+package never starts or stops daemons itself.
+
+```{r daemons, eval = FALSE}
+mirai::daemons(4)                    # 4 background R processes
+mirai::status()                      # how many are connected
+# ... run the workflow ...
+mirai::daemons(0)                    # stop them
+```
+
+How many:
+
+- **CPU-bound steps** (conditioning, terrain, positional draws): up to the
+  number of physical cores less one. WhiteboxTools is multithreaded
+  itself, so each process is given `cores %/% daemons` threads
+  (`options(AKCatchments.wbt_threads = )` to override): the machine is used
+  fully either way, and parallel sites mostly help with the steps that are
+  not WhiteboxTools.
+- **Web-bound steps** (DEM windows, Soil Data Access, SNAP, Landsat): 4-6.
+  Each daemon is another connection to the same server; more is slower,
+  or gets you throttled.
+- **Memory**: each process holds one site's (or one window's) rasters,
+  up to a few hundred MB for the largest catchments at 5 m. With 16 GB,
+  4 daemons is a safe start; regional windows are larger, so use fewer
+  daemons with `regional = TRUE` on big clusters.
+
+The daemons load the **installed** package. After changing the source,
+reinstall (`devtools::install()`); under `pkgload::load_all()` the loops
+run sequentially, with a message. Results are the same either way:
+random draws are seeded per site, not per session.
+
+Progress: every loop shows a progress bar naming the site (or cluster, or
+coverage) it is on. For a log of a long batch job, set
+`options(AKCatchments.verbose = TRUE)` for one line per finished site
+with its time.
+
+## 3. The run
+
+### 3.1 Cache and prefetch
+
+```{r cache, eval = FALSE}
+ak_set_cache("D:/AKCatchments_cache", persist = "user")   # once per machine
+pts <- read.csv("cakn_sites.csv")      # site_code, lat, lon; optional ref_area_km2, snap_dist_m, dem_source, ...
+```
+
+The statewide files are prefetched after delineation (they need the
+catchments' extent), or now from a rough area:
+
+```{r prefetch, eval = FALSE}
+area <- sf::st_as_sf(pts, coords = c("lon", "lat"), crs = 4326) |>
+  sf::st_buffer(20000) |> sf::st_union() |> sf::st_sf(site_code = "area", geometry = _)
+ak_prefetch(area)                       # land cover, alder, PRISM, geology, Pastick, fire perimeters
+```
+
+### 3.2 Delineate
+
+```{r delineate, eval = FALSE}
+mirai::daemons(4)
+x <- ak_catchments(pts, regional = TRUE, plot_dir = "plots/delineation", keep_delineations = TRUE)
+x                                       # delin_ok and flags
+attr(x, "errors")                       # sites that failed, and why
+table(x$window_mode)                    # which sites shared a window
+```
+
+Look at every plot in `plots/delineation`. For sites with
+`delin_ok = FALSE`, or that look wrong, add a `ref_area_km2`, a larger
+`snap_dist_m` or another `dem_source` in the points table and rerun those
+rows; or draw the catchment by hand and import it (3.4).
+
+The first time, compare the two delineation paths on your sites:
+
+```{r compare-paths, eval = FALSE}
+x_site <- ak_catchments(pts, regional = FALSE, plot = FALSE)
+compare_catchments(x_site, x) |> dplyr::arrange(iou) |> head()   # expect IoU near 1
+```
+
+### 3.3 Compare with your reference polygons
+
+```{r validate, eval = FALSE}
+hand <- sf::read_sf("hand_catchments.gpkg")
+compare_catchments(x, hand) |> dplyr::arrange(iou)   # IoU, area ratio, Hausdorff, agree
+```
+
+See `vignette("delineation")`, section 4.
+
+### 3.4 The final set of polygons
+
+```{r final, eval = FALSE}
+fixed <- import_catchments(sf::read_sf("hand_fixes.gpkg"))   # conditions their DEM too
+x <- dplyr::bind_rows(x[!x$site_code %in% fixed$site_code, ], fixed)
+x <- import_catchments(x, condition = FALSE)                  # one object again, with provenance
+```
+
+### 3.5 Attributes: one value per site
+
+Each function appends its columns, with uncertainty columns and a
+provenance row:
+
+```{r layers, eval = FALSE}
+x <- x |>
+  ak_topography() |>
+  ak_outlet_slope(points = pts) |>
+  ak_landcover() |>
+  ak_alder() |>
+  ak_alder(source = "nps_wrst") |>
+  ak_permafrost() |>
+  ak_permafrost(source = "pastick2015") |>
+  ak_glaciers() |>
+  ak_geology() |>
+  ak_soils() |>
+  ak_fire() |>
+  ak_climate_normals()
+ak_provenance(x)
+attribute_reliability(x)                 # how much of each variable's spread is error
+```
+
+### 3.6 Long tables: by day, year, model, sample
+
+```{r tables, eval = FALSE}
+samples <- read.csv("cakn_samples.csv")   # site_code, sample_date, ...
+w  <- ak_weather(x, years = 1990:2024)    # concurrent pixel requests
+so <- ak_snowoff(x, years = 2001:2022, weather = w)
+ws <- weather_at_samples(w, samples, snowoff = so)   # anomalies vs the 1991-2020 daily normal, melt, degree days
+x  <- ak_climate_normals(x, "daymet4", weather = w)  # the same normal, as monthly columns
+
+dl <- ak_climate_projection(x, seasons = ak_seasons(months = FALSE)[c("annual", "jja", "djf")],
+                            periods = list(`2041-2070` = 2041:2070))
+x  <- catchment_join(x, projection_ensemble(dl, wide = TRUE))
+
+g  <- ak_peak_ndvi(x, years = 1985:2024)
+x  <- catchment_join(x, peak_ndvi_summary(g, trend_years = 1985:2024))
+fw <- ak_fire(x, samples = samples)        # burned share in windows before each sample year
+mirai::daemons(0)
+```
+
+### 3.7 Write it out
+
+```{r write, eval = FALSE}
+ak_write(x, "cakn_catchments.gpkg", weather = w, snowoff = so, samples = ws,
+         projections = dl, ndvi = g, fire_windows = fw)
+```
+
+The GeoPackage holds the polygons with every column, the provenance of
+everything in it (product, version, download dates, arguments, and which
+table each row belongs to), the per-site errors, and each table. That is
+the unit to archive or hand on.
+
+## 4. Rerunning
+
+Everything downloaded is in the cache, and the conditioned rasters stay
+with the delineations, so a rerun (new sites, a fixed polygon, another
+layer) downloads only what is new. To refresh one source after its
+provider updates it, pass `refresh = TRUE` to that function (fire
+perimeters after a fire season; SNAP or Landsat to start over).

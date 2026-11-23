@@ -1,0 +1,142 @@
+---
+title: "Permafrost extent and ground ice: Jorgenson et al. 2008"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Permafrost extent and ground ice: Jorgenson et al. 2008}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Shares of permafrost extent classes (continuous, discontinuous, sporadic,
+isolated) and ground-ice classes, and a total permafrost estimate with
+uncertainty, from the Permafrost Characteristics of Alaska map (Jorgenson
+et al. 2008), the source of the NPS catchment descriptors' permafrost
+columns.
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+**Manual download.** The shapefile is in the North Slope Science Catalog
+(dataset 1725) and can't be fetched by script. Download it, unzip it into
+the cache's `jorgenson_2008/` folder (or pass `path`):
+
+```{r manual, eval = FALSE}
+ak_cache_dir("jorgenson_2008")                        # where to put it
+ak_prefetch(x, layers = "permafrost/jorgenson2008")   # says whether it is found
+```
+
+The 2008 shapefile codes extent as letters in `PF_EXTENT` (C, D, S, I,
+plus G glacier, U unfrozen, W water); other versions with class names work
+too (`ext_field`, `ice_field` override the detection).
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")   # one catchment
+ak_permafrost(d)                                     # one catchment: its row with the columns added
+
+x <- ak_catchments(pts)                                  # many: data frame of site_code, lat, lon
+x <- ak_permafrost(x)                            # columns appended to x, provenance recorded
+ak_provenance(x)
+
+ak_permafrost(sf::read_sf("hand_catchments.gpkg"))            # your own polygons with site_code (or import_catchments())
+```
+
+The ground-ice shares (`groundice_pct_*`) come with them. `sigma_m`
+(positional SD, default 1000 m) and `n` (draws, 500) set the simulation;
+`sigma_m = 0` keeps only the class ranges.
+
+## 3. What you get
+
+`jorg_pct_<class>` (percent of the whole catchment), `jorg_pct_coverage_pct`,
+`groundice_pct_<class>`, `totperm_pct` (class-midpoint estimate),
+`totperm_pct_se`, `totperm_pct_lo95`, `totperm_pct_hi95`,
+`totperm_pct_flag` (`jitter_dominates`).
+
+## 4. Uncertainty: how it is computed
+
+**Product error (P).** The map gives extent classes, each a range of
+permafrost fraction: continuous 90-100%, discontinuous 50-90%, sporadic
+10-50%, isolated 1-10% (the package's lower bound for isolated is 1%; the
+class definition is under 10%, so 0-10% is the alternative). Its
+catalogue entry warns of 1-3 km horizontal error.
+
+**Calculation.** 500 draws, each combining:
+
+- a random shift of the catchment against the map, N(0, `sigma_m`) in x
+  and y (`sigma_m = 1000` by default: median shift 1.2 km, 90th
+  percentile 2.1 km);
+- a permafrost fraction for each class drawn uniformly within its range.
+
+`totperm_pct` is the class-midpoint estimate on the mapped shares;
+`_se`, `_lo95`, `_hi95` summarise the draws. `totperm_pct_flag` says
+`jitter_dominates` where the shift part of the spread is larger than the
+class-range part: the map's placement, not its class definitions, sets
+the uncertainty there (usually small catchments near class boundaries).
+
+```{r rayleigh}
+sigma <- 1000
+c(median_shift_m = sigma * sqrt(2 * log(2)), p90_shift_m = sigma * sqrt(-2 * log(0.1)))
+```
+
+**Assumptions and alternatives.**
+
+- Uniform within class. A distribution concentrated near the class centre
+  (triangular, beta) gives smaller SEs; uniform is the cautious choice.
+- The class fractions are drawn once per draw for all sites, so the
+  class-range part is shared between sites (a systematic error: if
+  "discontinuous" really means 60%, it means it everywhere). Per-site
+  marginal SEs don't depend on this, but between-site differences are
+  more certain than the per-site SEs suggest.
+- A rigid shift of the whole catchment treats the map's error as uniform
+  across the catchment. Independent errors on each boundary would give
+  less spread in large catchments.
+- `sigma_m` is the dominant choice for small catchments; rerun with 500
+  and 2000 m to see how much it matters.
+- Pastick et al. (2015) is an independent estimate of the same thing; the
+  difference between the two products is a third view of the uncertainty.
+
+### Ground ice
+
+`groundice_pct_*` are class shares from the same map, with the same
+positional error. No SE is computed by default; run
+`positional_uncertainty()` on the map with the ground-ice field to get
+one.
+
+## 5. Checking and validating it
+
+- **Against the NPS descriptors.** For CAKN sites, `totperm_pct` should
+  match the NPS per*perm columns where the polygons are the same.
+- **Against Pastick.** An independent model of a related quantity
+  (near-surface permafrost probability):
+
+```{r compare, eval = FALSE}
+ak_permafrost(x) |> ak_permafrost(source = "pastick2015") |>   # both maps on the same catchments
+  dplyr::select(site_code, totperm_pct, totperm_pct_lo95, totperm_pct_hi95, pf_prob_mean, pf_land_lo, pf_land_hi)
+```
+
+  Disagreement beyond both products' ranges points at sites where neither
+  should be trusted.
+- **Sensitivity to `sigma_m`.** Rerun with 500 and 2000 m.
+
+## 6. Pitfalls
+
+- 1-3 km positional error against catchments of a few km²: small
+  catchments near class boundaries can be wholly misassigned.
+- Extent classes are ranges, not measurements; the midpoint is a choice.
+- The class-range part of the error is shared between sites (section 4 above).
+
+## References
+
+- Jorgenson, T. et al. (2008). Permafrost characteristics of Alaska. Proceedings of the Ninth International Conference on Permafrost, extended abstracts. Data: North Slope Science Catalog, dataset 1725.

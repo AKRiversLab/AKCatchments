@@ -1,0 +1,124 @@
+---
+title: "Geology: USGS Geologic Map of Alaska (SIM 3340)"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Geology: USGS Geologic Map of Alaska (SIM 3340)}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Which lithologies the mapped units in each catchment contain, from the
+Geologic Map of Alaska (Wilson et al. 2015, USGS SIM 3340; compiled from
+1:250,000 maps), as lower and upper bounds, plus the geo workflow's
+equal-allocation rock classes.
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic, once: the map geodatabase (`sim3340_gdb.zip`) from USGS into the
+cache's `ak_geology/` folder. Only the map around the catchments is read.
+
+```{r prefetch, eval = FALSE}
+ak_prefetch(x, layers = "geology/sim3340")
+```
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")
+ak_geology(d)                    # one catchment: its row with the geol_* columns
+
+x <- ak_catchments(pts) |> ak_geology()       # occurrence and class columns appended
+g <- ak_geology(x, details = TRUE)
+g$unit_areas          # site x map unit
+g$units               # map-unit polygons with one logical column per pattern and rank
+
+ak_lithology_patterns()                          # the default patterns (regular expressions)
+ak_geology(x, patterns = c(ak_lithology_patterns(), graphite = "graphit"))
+```
+
+For N-bearing rocks (micas, schists, phyllites), the default patterns
+include `schist` and `mica_mentioned`; a zero means no unit description
+mentions it, not that it is absent. For a continuous estimate of rock N
+(and S and the major oxides) from the same lithologies, with uncertainty,
+see `ak_rock_chem()` and `vignette("rock-chemistry")`.
+
+**Ranks.** Each lithology of a map unit has a rank defined as a share of
+the unit (SIM 3340): Major at least 33%, Minor 10-33%, Incidental under
+10%, plus Indeterminate. The occurrence bounds below use them as "major
+only" vs. "any rank"; `ak_rock_chem()` turns them into share ranges.
+
+## 3. What you get
+
+The occurrence columns: `geol_contains_pct_<pattern>` (units listing it at any rank:
+upper bound), `geol_major_contains_pct_<pattern>` (major constituents
+only: lower bound), the equal-allocation classes `geol_pct_<class>`
+(carbonate, unconsolidated, fine clastic, felsic intrusive, mafic volcanic,
+metamorphic, coarse clastic, other; sum to 100), `geol_fast_weathering_pct`,
+`geol_thaw_susceptible_pct`, `geol_flag` (`partial_coverage`,
+`undescribed_units`). Pattern categories overlap and are never summed.
+
+## 4. Uncertainty: how it is computed
+
+**Product error.** None published beyond scale: printed at 1:1,584,000,
+nominal use 1:250,000. The composition of mixed map units is unknown.
+
+**What is reported.** Two bounds for each lithology pattern: the share of
+the catchment under units listing it as a major constituent (lower) and at
+any rank (upper). Categories overlap and must not be summed; a zero means
+"no matching description", not "absent". The equal-allocation classes
+(`geol_pct_*`) are a convenience with no stated uncertainty; prefer the
+bounds.
+
+**Positional error.** Optional, through `positional_uncertainty()` on
+the returned `units`. The map-accuracy standard for 1:250,000 maps is 1/50
+inch at map scale, 127 m, for 90% of well-defined points: a CE90. As a
+per-axis SD that is 59 m:
+
+```{r nmas}
+ce90 <- 0.02 * 0.0254 * 250000               # 1/50 inch at 1:250,000, metres
+c(ce90_m = ce90, sigma_m = ce90 / sqrt(-2 * log(0.1)))
+```
+
+Contacts are not well-defined points, so the package suggests 127 m as
+the SD (about twice the standard) and 2-4 times that as a sensitivity
+check.
+
+Positional spread, if wanted:
+
+```{r positional, eval = FALSE}
+u <- g$units
+positional_uncertainty(x, u, field = "schist_major", sigma_m = 127)
+```
+
+## 5. Checking and validating it
+
+- **Bounds first.** Where the lower and upper bounds differ widely, the map
+  can't say how much of the rock is there; don't use the value as a
+  continuous predictor without saying so.
+- **Finer maps.** DGGS 1:63,360 quadrangles exist for parts of the parks;
+  where they do, compare the unit descriptions for a few sites.
+- **Chemistry.** Major-ion ratios (Ca:Na, SO4) are a field check on the
+  mapped lithology at sites with chemistry.
+
+## 6. Pitfalls
+
+- 1:250,000 contacts against catchments of a few km²: small catchments can
+  sit entirely in a unit that isn't there on the ground.
+- Equal allocation is an assumption about mixed units; prefer the bounds.
+  (It ignores the rank ranges above; `ak_rock_chem()` uses them.)
+
+## References
+
+- Wilson, F. H. et al. (2015). Geologic map of Alaska. USGS Scientific Investigations Map 3340, doi:10.3133/sim3340.

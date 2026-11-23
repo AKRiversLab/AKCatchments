@@ -1,0 +1,86 @@
+---
+title: "Fire: BLM Alaska Fire Service perimeters"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Fire: BLM Alaska Fire Service perimeters}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Burned area per catchment and fire year, burned fractions in windows
+before each sample, and a static fire summary, from the BLM Alaska Fire
+Service fire perimeter history (1940 on; prescribed burns dropped; burns
+of one year unioned so overlaps count once).
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Automatic: perimeters for the catchments' area are queried from the AFS
+feature service and cached in `fire_history_ak.gpkg`, with the area they
+cover; catchments outside it trigger a new query over both. After a new
+fire season, use `refresh = TRUE`.
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")
+ak_fire(d)                                                   # one catchment: burned %, last fire year
+
+x <- ak_catchments(pts)
+x <- ak_fire(x)                                              # columns appended: burned %, last fire year
+fy <- ak_fire(x, by_year = TRUE)                             # table: burned area by site and fire year
+fw <- ak_fire(x, samples = data.frame(site_code = x$site_code, year = 2020L))   # table: windows before each sample
+```
+
+## 3. What you get
+
+`ak_fire(x)` appends `fire_burned_pct`, `fire_burned_pct_since1987`,
+`fire_last_year`, `fire_n_years` and `fire_flag` (`small_catchment`).
+`ak_fire(x, by_year = TRUE)`: `site_code`, `fire_year`, `burned_km2`,
+`burned_frac`, `mapping_min_acres`. `ak_fire(x, samples = )`:
+`burn_frac_5yr`, `burn_frac_15yr`, `burn_frac_hist`, `burn_frac_same_yr`,
+`fire_min_acres_hist`. Both tables carry their provenance; write them
+with the catchments using `ak_write(x, file, fire = fy)`.
+
+## 4. Uncertainty: how it is computed
+
+**Product error.** Mapping emphasis changed: fires of at least 1,000 acres
+before 1987, 100 acres from 1987 to 2015, more than 10 acres from 2016.
+Small burns in small catchments are missed early in the record, which
+makes fire look as if it increases over time. Perimeters also include
+unburned islands, so burned fractions are upper values.
+
+**What is reported.** `mapping_min_acres` per fire year,
+`fire_min_acres_hist` for each window, and for the static summary
+(`ak_fire(x)`) `fire_flag = small_catchment` where the catchment is
+smaller than the pre-1987 threshold (1,000 acres, 4 km²). There is no SE.
+MTBS burn severity is the natural alternative for fires it covers.
+
+## 5. Checking and validating it
+
+- **Imagery.** Recent burns are visible on the delineation plots.
+- **MTBS** perimeters and severity cover larger fires since 1984; compare
+  burned fractions where both exist.
+- **Record changes.** Plot burned area by year with `mapping_min_acres`:
+  an apparent increase after 1987 or 2016 is partly mapping.
+
+## 6. Pitfalls
+
+- Perimeters include unburned islands: burned fractions are upper values.
+- `burn_frac_same_yr` includes fires after the sample date.
+- Don't read the fire variables as a trend.
+
+## References
+
+- BLM Alaska Fire Service. Alaska statewide fire history perimeter polygons (AICC).

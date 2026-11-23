@@ -1,0 +1,103 @@
+---
+title: "Soils: STATSGO2 through Soil Data Access"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Soils: STATSGO2 through Soil Data Access}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(AKCatchments)
+options(AKCatchments.cache = file.path(tempdir(), "ak_vignette_cache"))
+```
+
+Area-weighted soil properties (organic matter, clay, sand, Ksat, bulk
+density, 0-50 cm) and the shares of Gelisols, Histosols and poorly drained
+soils in each catchment, from STATSGO2 (1:250,000; the only soil survey
+covering all of these catchments), queried from NRCS Soil Data Access.
+
+Input, as for every layer: catchments (sf polygons with `site_code`, one
+row per catchment, any CRS; a single `ak_delineate()` result, a list of
+them, `ak_catchments()` output or your own polygons). Chunks that download
+data are not run when this vignette is built; chunks that only compute
+are. The other layers are listed in `vignette("delineation")`, section 7.
+
+## 1. Getting the data
+
+Nothing is downloaded in advance: each call queries Soil Data Access for
+the map units in the catchments (outlines simplified to 30 m, retried up to
+three times). Needs the `soilDB` package.
+
+## 2. Using it
+
+```{r use, eval = FALSE}
+d <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001")
+ak_soils(d)                     # one catchment: its row with the soil_* columns
+
+x <- ak_catchments(pts) |> ak_soils(lh_range = 0.9)    # columns appended; one SDA query per site
+s <- ak_soils(x, details = TRUE)
+s$catchments    # the same, with the columns
+s$mapunits      # site x map unit weights and property L/R/H
+s$components    # site x component: share L/R/H, order, drainage class
+```
+
+## 3. What you get
+
+The `soil_*` columns: `soil_om_pct`, `soil_clay_pct`, `soil_sand_pct`, `soil_ksat`,
+`soil_bulkdens` with `_lo` / `_hi` (area-weighted L and H values: a range,
+not an interval); `soil_gelisol_pct`, `soil_histosol_pct`,
+`soil_poorly_drained_pct` with `_se`, `_lo95`, `_hi95`; `soil_flag`
+(`assumed_concentration`, `no_soil_data`).
+
+## 4. Uncertainty: how it is computed
+
+**Product error.** Soil Data Access gives low, representative and high
+values (L/R/H) for each property and for each component's share of its
+map unit. NSSH Part 618 defines L and H as the spread of values (for
+example 5th-95th or 10th-90th percentiles), not a confidence interval.
+
+**Calculation.** For the Gelisol, Histosol and poorly drained shares: 500
+Dirichlet draws of component shares per map unit, centred on the
+representative shares, with the concentration set so each component's L-H
+range is its central `lh_range` (0.9 by default). The concentration for a
+component with share p and implied SD s is p(1 − p)/s² − 1; the map unit
+uses the median over its components. Where L/H are missing it uses
+`concentration = 20`, flagged `assumed_concentration` when such map units
+make up most of the catchment. Map-unit area weights are exact for the
+polygons.
+
+**Alternatives that matter.**
+
+- `lh_range = 0.8` (L/H as 10th-90th percentiles) implies a 28% larger SD
+  for each component (qnorm(0.95) / qnorm(0.9)), and about that much
+  larger SEs for the shares.
+- The fallback concentration (20) is arbitrary; try 5 and 50.
+- Map-unit boundaries at 1:250,000 carry positional error that is not
+  included; add it as for geology.
+
+**Property bounds** (`soil_*_lo`, `soil_*_hi`) are area-weighted averages
+of the components' L and H values: a typical low and high, not a
+percentile of the catchment and not an interval.
+
+## 5. Checking and validating it
+
+- **Against permafrost maps.** `soil_gelisol_pct` should track Jorgenson
+  and Pastick permafrost; large mismatches mark map units to look at.
+- **Sensitivity.** Rerun with `lh_range = 0.8` and with `concentration`
+  5 and 50 where `assumed_concentration` is flagged.
+- **SSURGO.** Where detailed surveys exist (parts of DENA), compare.
+
+## 6. Pitfalls
+
+- STATSGO2 map units are tens of km² mixtures of components with no
+  location within the unit.
+- `_lo` / `_hi` are not intervals.
+- Soil Data Access can be slow or refuse long queries; errors are
+  reported, and sites with no data get `NA` and `no_soil_data`.
+
+## References
+
+- Soil Survey Staff, NRCS. U.S. General Soil Map (STATSGO2), Soil Data Access.
+- USDA NRCS. National Soil Survey Handbook, Part 618.

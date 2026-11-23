@@ -1,0 +1,11 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^LICENSE\.md$
+^README\.Rmd$
+^\.github$
+^data-raw$
+^doc$
+^Meta$
+^dev$
+^ak_live_tests_.*$
+^ai-use$
