@@ -2,7 +2,7 @@
 This package is currently in alpha testing, but we're happy to have anybody 
 attempt the workflows and contribute [Issues](https://github.com/AKRiversLab/AKCatchments/issues)!
 
-AKCatchments is meant for generating catchment-scale information for streams in Alaska, 
+AKCatchments generates catchment-scale information for streams in Alaska, 
 where tools like StreamCat are currently underdeveloped (though are available in some locations!) compared
 to the lower 48. This information should then be suitable (or at least evaluatable) for use in downstream
 scientific analyses. Here's the conceptual workflow:
