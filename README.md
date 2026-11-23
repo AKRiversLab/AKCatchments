@@ -1,11 +1,20 @@
 # AKCatchments
+This package is currently in alpha testing, but we're happy to have anybody 
+attempt the workflows and contribute [Issues](https://github.com/AKRiversLab/AKCatchments/issues)!
 
-Delineate the catchment above any stream point in Alaska from a latitude and
-longitude, check the result, and summarise catchment attributes (topography,
-climate, fire, geology, soils, land cover, permafrost, alder, snow-off) with
-their uncertainty stated alongside each value.
+AKCatchments is meant for generating catchment-scale information for streams in Alaska, 
+where tools like StreamCat are currently underdeveloped (though are available in some locations!) compared
+to the lower 48. This information should then be suitable (or at least evaluatable) for use in downstream
+scientific analyses. Here's the conceptual workflow:
 
-Every delineation is flagged by automatic checks and plotted on satellite
+1) Delineate a catchment above any stream point in Alaska from a latitude and
+longitude,
+2) Check the result*, 
+3) Summarise catchment attributes (topography, climate, fire, geology, soils, 
+land cover, permafrost, alder, snow-off) with their uncertainty stated alongside 
+each value.
+
+*Every delineation is flagged by automatic checks and plotted on satellite
 imagery with the DEM channels and a reference flowline network, so you can
 see whether it makes sense before you use it.
 
@@ -13,7 +22,7 @@ see whether it makes sense before you use it.
 
 ```r
 # install.packages("remotes")
-remotes::install_github("<github-user>/AKCatchments")
+remotes::install_github("AKRiversLab/AKCatchments")
 
 # WhiteboxTools does the flow routing; install its binary once
 whitebox::install_whitebox()
@@ -302,8 +311,8 @@ The USGS functions use the Water Data APIs through dataRetrieval's
 
 `ak_layers(details = TRUE)` returns the full registry: product, citation, URL, licence,
 scale, published error, the columns that carry uncertainty, how it is
-computed, and the assumptions. Cite the underlying datasets, not only this
-package.
+computed, and the assumptions. **Cite the underlying datasets**, not only this
+package!
 
 ## Status
 
