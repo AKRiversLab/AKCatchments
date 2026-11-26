@@ -1,26 +1,25 @@
 # Conditioned DEM window for one catchment (used by import_catchments()): the DEM for the polygon plus
 # `buffer_m`, masked to that buffer (so flow accumulation sees only the catchment and its margin), then
-# least-cost breaching, D8 pointer and D8 accumulation. Breaching rather than filling: filled flats give
-# arbitrary flow directions, which would corrupt the upstream walk in ak_outlet_slope(). Files are cached in
-# scratch/<site_code>/, named by DEM source (and res and buffer when not the defaults), as in the geo workflow.
-condition_one <- function(poly, dem_source = "ifsar", res = NULL, dem_dir = NULL, buffer_m = 500, refresh = FALSE) {
+# depressions removed (breached by default), D8 pointer and D8 accumulation. Breaching rather than filling by
+# default: filled flats give arbitrary flow directions, which would corrupt the upstream walk in ak_outlet_slope().
+# Files are cached in scratch/<site_code>/, named by DEM source (and res and buffer when not the defaults), as in
+# the geo workflow; the conditioned ones also by depression method, so none made another way is reused.
+condition_one <- function(poly, dem_source = "ifsar", res = NULL, dem_dir = NULL, buffer_m = 500, refresh = FALSE,
+                          depressions = "breach") {
   tag <- paste0(switch(dem_source, local = "tiles", elevatr = "elevatr_z12", dem_source),
                 if (!is.null(res)) paste0("_", res, "m"), if (buffer_m != 500) paste0("_buf", buffer_m))
   wd <- ak_cache_dir("scratch", poly$site_code)
-  f <- list(dem = file.path(wd, sprintf("dem_%s.tif", tag)), filled = file.path(wd, sprintf("dem_breached_%s.tif", tag)),
-            pointer = file.path(wd, sprintf("d8_pointer_%s.tif", tag)), accum = file.path(wd, sprintf("d8_accum_%s.tif", tag)))
+  f <- list(dem = file.path(wd, sprintf("dem_%s.tif", tag)), filled = file.path(wd, sprintf("dem_%s_%s.tif", depressions, tag)),
+            pointer = file.path(wd, sprintf("d8_pointer_%s_%s.tif", depressions, tag)),
+            accum = file.path(wd, sprintf("d8_accum_%s_%s.tif", depressions, tag)))
   new_dem <- refresh || !file.exists(f$dem)
   if (new_dem) {
     win <- sf::st_buffer(sf::st_geometry(poly), buffer_m)
     d <- terra::mask(ak_dem(win, dem_source, res = res, dir = dem_dir), terra::vect(win))
     terra::writeRaster(d, f$dem, overwrite = TRUE, NAflag = -9999, datatype = "FLT4S")
   }
-  if (new_dem || !all(file.exists(unlist(f[-1])))) {
-    whitebox::wbt_breach_depressions_least_cost(f$dem, f$filled, dist = 100, fill = TRUE)
-    whitebox::wbt_d8_pointer(f$filled, f$pointer)
-    whitebox::wbt_d8_flow_accumulation(f$filled, f$accum, out_type = "cells")
-  }
-  data.frame(site_code = poly$site_code, dem_source = tag, dem_res_m = terra::res(terra::rast(f$dem))[1], f)
+  if (new_dem || !all(file.exists(unlist(f[-1])))) wbt_condition(f, depressions)
+  data.frame(site_code = poly$site_code, dem_source = tag, dem_res_m = terra::res(terra::rast(f$dem))[1], depressions = depressions, f)
 }
 
 # The conditioned rasters for each catchment: those carried by catchments from ak_catchments() or

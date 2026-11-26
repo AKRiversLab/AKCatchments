@@ -57,6 +57,13 @@
 #' @param keep_delineations Also keep each full `ak_delineation` (streams,
 #'   flowlines, snapped points) in `attr(x, "delineations")`, e.g. to redraw
 #'   with [plot_catchment()] and a reference outline.
+#' @param checkpoint_dir Folder in which each site's delineation is saved as
+#'   soon as it finishes (by the worker that did it). A later call with the
+#'   same site, coordinates and arguments, the same package version and the
+#'   same WhiteboxTools reads it back instead of delineating again, so a long
+#'   run that stops (interrupted, a crash, a power cut) resumes where it was;
+#'   a site whose arguments changed, or whose kept rasters are gone, is
+#'   delineated again. Failed sites are not saved. `NULL` (default): none.
 #' @return An `ak_catchments` object: sf polygons (EPSG:3338), one row per
 #'   delineated site, with the [ak_delineate()] diagnostics, flags and step
 #'   timings, the snapped outlet (`snapped_lon`, `snapped_lat`), `plot_file`,
@@ -75,7 +82,7 @@
 #' @seealso `vignette("delineation")`, `vignette("workflow")`
 #' @export
 ak_catchments <- function(points, ..., crs = 4326, regional = FALSE, cluster_km = NULL, plot = TRUE,
-                          plot_dir = "catchment_plots", keep_delineations = FALSE) {
+                          plot_dir = "catchment_plots", keep_delineations = FALSE, checkpoint_dir = NULL) {
   pts <- point_table(points, crs)
   common <- list(...)
   if ("workers" %in% names(common)) stop("`workers` is gone: start mirai daemons instead, e.g. mirai::daemons(4); see ?ak_parallel", call. = FALSE)
@@ -90,18 +97,23 @@ ak_catchments <- function(points, ..., crs = 4326, regional = FALSE, cluster_km 
                       c(list(lat = pts$lat[i], lon = pts$lon[i], site_code = pts$site_code[i]), own))
   })
   names(jobs) <- pts$site_code
-  res <- if (regional) {
-    groups <- cluster_jobs(jobs, cluster_km)
-    message(length(jobs), " sites in ", length(groups), " DEM windows (", sum(lengths(groups) > 1), " shared)")
+  if (!is.null(checkpoint_dir)) jobs <- with_checkpoints(jobs, checkpoint_dir)
+  saved <- purrr::compact(purrr::map(jobs, read_checkpoint))
+  if (length(saved)) message(length(saved), " of ", length(jobs), " sites read from their checkpoints in ", checkpoint_dir)
+  todo <- jobs[setdiff(names(jobs), names(saved))]
+  res <- if (!length(todo)) list() else if (regional) {
+    groups <- cluster_jobs(todo, cluster_km)
+    message(length(todo), " sites in ", length(groups), " DEM windows (", sum(lengths(groups) > 1), " shared)")
     by_site <- list()
     for (o in site_map(groups, delineate_cluster, label = "Delineating (regional)")) if (is.null(o$error)) by_site[names(o$value)] <- o$value
     # a group that failed as a whole: its sites one by one
-    miss <- setdiff(pts$site_code, names(by_site))
-    if (length(miss)) by_site[miss] <- site_map(jobs[miss], delineate_job, label = "Delineating")
-    by_site[pts$site_code]
+    miss <- setdiff(names(todo), names(by_site))
+    if (length(miss)) by_site[miss] <- site_map(todo[miss], delineate_job, label = "Delineating")
+    by_site
   } else {
-    site_map(jobs, delineate_job, label = "Delineating")
+    site_map(todo, delineate_job, label = "Delineating")
   }
+  res <- c(lapply(saved, \(d) list(value = d)), res)[pts$site_code]
   names(res) <- pts$site_code
   ok <- vapply(res, \(r) inherits(r$value, "ak_delineation"), TRUE)
   errors <- dplyr::tibble(site_code = pts$site_code[!ok], step = "delineation",
@@ -127,7 +139,7 @@ ak_catchments <- function(points, ..., crs = 4326, regional = FALSE, cluster_km 
 cluster_jobs <- function(jobs, cluster_km = NULL) {
   dflt <- formals(ak_delineate)
   get <- \(a, k) a[[k]] %||% eval(dflt[[k]])
-  key <- vapply(jobs, \(a) paste(get(a, "dem_source"), deparse(a$res), deparse(a$dem_dir), get(a, "max_cells"),
+  key <- vapply(jobs, \(a) paste(get(a, "dem_source"), deparse(a$res), deparse(a$dem_dir), get(a, "max_cells"), get(a, "depressions")[1],
                                  get(a, "stream_threshold_km2"), deparse(a$flowlines %||% "3dhp"), deparse(a$fallback_dem), sep = "|"), "")
   out <- list()
   for (k in unique(key)) {
@@ -145,7 +157,41 @@ cluster_jobs <- function(jobs, cluster_km = NULL) {
   out
 }
 
-delineate_job <- function(a) do.call(ak_delineate, a)
+delineate_job <- function(a) {
+  d <- do.call(ak_delineate, a)
+  save_checkpoint(d, attr(a, "checkpoint"))
+  d
+}
+
+# Each job gets attr "checkpoint": its file in `dir` and a key (hash of the job's arguments, the package version and
+# the WhiteboxTools version), which a saved delineation must match to be used
+with_checkpoints <- function(jobs, dir) {
+  dir.create(dir, recursive = TRUE, showWarnings = FALSE)
+  versions <- list(pkg = as.character(utils::packageVersion("AKCatchments")),
+                   wbt = tryCatch(utils::head(suppressMessages(whitebox::wbt_version()), 1), error = \(e) NA_character_))
+  purrr::imap(jobs, \(a, s) {
+    attr(a, "checkpoint") <- list(file = file.path(dir, sprintf("%s_%s.rds", gsub("[^A-Za-z0-9._-]+", "_", s), substr(rlang::hash(s), 1, 8))),
+                                  key = rlang::hash(list(a, versions)))
+    a
+  })
+}
+
+read_checkpoint <- function(a) {
+  cp <- attr(a, "checkpoint")
+  if (is.null(cp) || !file.exists(cp$file)) return(NULL)
+  x <- tryCatch(readRDS(cp$file), error = \(e) NULL)
+  d <- if (identical(x$key, cp$key)) x$value
+  if (!inherits(d, "ak_delineation") || !all(file.exists(unlist(d$files)))) return(NULL)
+  d
+}
+
+save_checkpoint <- function(d, cp) {
+  if (is.null(cp)) return(invisible())
+  part <- sprintf("%s.%s.part", cp$file, Sys.getpid())
+  saveRDS(list(key = cp$key, value = d), part)
+  if (!rename_retry(part, cp$file)) unlink(part)
+  invisible()
+}
 
 # Delineate a group of nearby points on one shared DEM window. A single point goes through ak_delineate().
 # Points whose catchment reaches the shared window's edge, or that fail on it, are delineated on their own.
@@ -158,24 +204,30 @@ delineate_cluster <- function(jobs) {
   dflt <- formals(ak_delineate)
   get <- \(a, k) if (k %in% names(a)) a[[k]] else eval(dflt[[k]])
   dem_src <- get(a1, "dem_source")
+  depressions <- match.arg(get(a1, "depressions"), eval(dflt$depressions))
   res0 <- get(a1, "res") %||% default_res(dem_src)
-  pts <- purrr::map(jobs, \(a) site_point(a$site_code, a$lat, a$lon))
   buf <- max(vapply(jobs, \(a) get(a, "start_buffer_m") %||% start_buffer(get(a, "ref_area_km2"), dem_src), 0))
-  win <- sf::st_union(sf::st_buffer(dplyr::bind_rows(pts), buf))
-  side <- max(diff(sf::st_bbox(win)[c(1, 3)]), diff(sf::st_bbox(win)[c(2, 4)]))
-  r <- if (is.na(res0)) NULL else max(res0, side / get(a1, "max_cells"))
+  # the window holding every point's first window (the square of the largest start buffer, or its own `window`)
+  wins <- purrr::map(jobs, \(a) first_window(sf::st_coordinates(site_point(a$site_code, a$lat, a$lon))[1, ], get(a, "window"), buf,
+                                             get(a, "snap_dist_m"), get(a, "max_buffer_m")))
+  win <- c(xmin = min(purrr::map_dbl(wins, "xmin")), ymin = min(purrr::map_dbl(wins, "ymin")),
+           xmax = max(purrr::map_dbl(wins, "xmax")), ymax = max(purrr::map_dbl(wins, "ymax")))
+  plan <- if (any(!vapply(jobs, \(a) is.null(get(a, "window")), TRUE))) "given" else "square"
   wd <- tempfile("akregion_")
   dir.create(wd)
   on.exit(unlink(wd, recursive = TRUE), add = TRUE)
-  t0 <- Sys.time()
-  dem <- ak_dem(win, dem_src, res = r, dir = get(a1, "dem_dir"))
-  t_dem <- since(t0)
-  t0 <- Sys.time()
-  f <- ak_condition(dem, wd)
-  f$streams <- dem_streams(f, get(a1, "stream_threshold_km2"), wd)
-  t_cond <- since(t0)
   n <- length(jobs)
   label <- sprintf("regional:%s+%d", a1$site_code, n - 1)
+  t0 <- Sys.time()
+  dem <- ak_dem(window_aoi(win), dem_src, res = window_res(res0, win, get(a1, "max_cells")), dir = get(a1, "dem_dir"))
+  win <- window_of(dem)
+  t_dem <- since(t0)
+  stage_log(label, "shared window dem", t0, window_text(win, dem))
+  t0 <- Sys.time()
+  f <- ak_condition(dem, wd, depressions)
+  f$streams <- dem_streams(f, get(a1, "stream_threshold_km2"), wd)
+  t_cond <- since(t0)
+  stage_log(label, "shared window condition", t0)
   out <- purrr::map(jobs, \(a) {
     t0 <- Sys.time()
     res <- tryCatch({
@@ -188,13 +240,17 @@ delineate_cluster <- function(jobs) {
       w <- outlet_watershed(pt, f, wd, get(a, "snap_dist_m"), get(a, "ref_area_km2"), get(a, "stream_threshold_km2"),
                             snap, reaches)
       if (w$truncated) NULL else {
-        d <- finish_delineation(a$site_code, a$lat, a$lon, get(a, "ref_area_km2"), pt, w, f, dem, wd, buf = buf,
+        d <- finish_delineation(a$site_code, a$lat, a$lon, get(a, "ref_area_km2"), pt, w, f, dem, wd, win = win, plan = plan,
                                 snap_dist_m = get(a, "snap_dist_m"), stream_threshold_km2 = get(a, "stream_threshold_km2"),
                                 flowlines = get(a, "flowlines"), plot = get(a, "plot"), plot_dir = get(a, "plot_dir"),
                                 times = c(dem = t_dem / n, condition = t_cond / n, watershed = since(t0)), n_windows = 1L,
                                 window_mode = label, t_start = t0 - (t_dem + t_cond) / n,
-                                snap_alternatives = isTRUE(get(a, "snap_alternatives")), keep_rasters = get(a, "keep_rasters"))
-        if (isTRUE(d$catchment$nodata_edge) && !is.null(get(a, "fallback_dem"))) NULL else list(value = d)
+                                snap_alternatives = isTRUE(get(a, "snap_alternatives")), keep_rasters = get(a, "keep_rasters"),
+                                depressions = depressions)
+        if (isTRUE(d$catchment$nodata_edge) && !is.null(get(a, "fallback_dem"))) NULL else {
+          save_checkpoint(d, attr(a, "checkpoint"))
+          list(value = d)
+        }
       }
     }, error = \(e) NULL)
     # not finished on the shared window: on its own, with expanding windows (and the fallback DEM, if any)
@@ -211,8 +267,8 @@ delineate_cluster <- function(jobs) {
 #' polygons, StreamStats or gaged-basin boundaries, or polygons from another
 #' tool. Checks them (one valid polygon per unique `site_code`), fetches the
 #' DEM for each polygon plus `buffer_m`, masks it to that buffer and
-#' conditions it for flow routing (least-cost breaching, D8 pointer and
-#' accumulation), so [ak_topography()] and [ak_outlet_slope()] work on them
+#' conditions it for flow routing (depressions breached or filled, D8
+#' pointer and accumulation), so [ak_topography()] and [ak_outlet_slope()] work on them
 #' as on delineated catchments. Returns the same kind of object as
 #' [ak_catchments()], ready for every layer function.
 #'
@@ -220,9 +276,11 @@ delineate_cluster <- function(jobs) {
 #' folder, named by DEM source (and by `res` and `buffer_m` when these are
 #' not the defaults), so reruns reuse them. With the defaults the files are
 #' named as in the geo workflow (`dem_tiles.tif` for local tiles,
-#' `dem_elevatr_z12.tif` for elevatr), so its windows are reused. Breaching
-#' is used rather than filling because filled flats give arbitrary flow
-#' directions, which would corrupt the upstream walk in [ak_outlet_slope()].
+#' `dem_elevatr_z12.tif` for elevatr), so its windows are reused; the
+#' conditioned rasters also carry the depression method in their names.
+#' Breaching is the default rather than filling because filled flats give
+#' arbitrary flow directions, which would corrupt the upstream walk in
+#' [ak_outlet_slope()].
 #'
 #' Polygons only, without the DEM (`condition = FALSE`), is enough for every
 #' layer except topography and outlet slope.
@@ -231,11 +289,13 @@ delineate_cluster <- function(jobs) {
 #'   `ak_delineation` objects.
 #' @param condition Fetch and condition the DEM?
 #' @param dem_source,res,dem_dir Passed to [ak_dem()].
+#' @param depressions How depressions are removed: `"breach"`,
+#'   `"least_cost"` or `"fill"`, as in [ak_delineate()].
 #' @param buffer_m Margin around each catchment, metres.
 #' @param refresh Rebuild cached files?
 #' @return An `ak_catchments` object: the polygons with their columns (and
 #'   any provenance they already carry, with a row for the import added),
-#'   `area_km2`, and (with `condition`) `dem_source`, `dem_res_m` and the
+#'   `area_km2`, and (with `condition`) `dem_source`, `dem_res_m`, `depressions` and the
 #'   raster paths `dem_file`, `filled_file`, `pointer_file`, `accum_file`.
 #'   Sites whose DEM fails keep their polygon, without raster paths, and are
 #'   listed in `attr(x, "errors")`.
@@ -247,7 +307,8 @@ delineate_cluster <- function(jobs) {
 #' @seealso `vignette("delineation")`, `vignette("topography")`
 #' @export
 import_catchments <- function(catchments, condition = TRUE, dem_source = "ifsar", res = NULL, dem_dir = NULL,
-                              buffer_m = 500, refresh = FALSE) {
+                              buffer_m = 500, refresh = FALSE, depressions = c("breach", "least_cost", "fill")) {
+  depressions <- match.arg(depressions)
   x0 <- catchment_sf(catchments)
   if (!inherits(x0, "sf") || !"site_code" %in% names(x0)) stop("`catchments` must be sf polygons with a site_code column", call. = FALSE)
   check_catchments(x0)
@@ -260,13 +321,14 @@ import_catchments <- function(catchments, condition = TRUE, dem_source = "ifsar"
     wbt_ready()
     items <- stats::setNames(lapply(seq_len(nrow(y)), \(i) y[i, ]), y$site_code)
     res_ <- site_map(items, condition_one, dem_source = dem_source, res = res, dem_dir = dem_dir, buffer_m = buffer_m,
-                     refresh = refresh, label = "Conditioning DEM")
+                     refresh = refresh, depressions = depressions, label = "Conditioning DEM")
     r <- purrr::list_rbind(site_values(res_))
     errors <- site_errors(res_, "condition_dem")
     if (NROW(r)) {
       i <- match(x$site_code, r$site_code)
       x$dem_source <- r$dem_source[i]
       x$dem_res_m <- r$dem_res_m[i]
+      x$depressions <- r$depressions[i]
       for (k in c("dem", "filled", "pointer", "accum")) x[[paste0(k, "_file")]] <- r[[k]][i]
     }
   }
@@ -274,7 +336,8 @@ import_catchments <- function(catchments, condition = TRUE, dem_source = "ifsar"
   x <- x[c(setdiff(names(x), g), g)]
   v <- if (dem_source %in% ak_layers("catchment")$variant) dem_source else "local"
   prov <- provenance_row(layer_row("catchment", v, fn = "import_catchments"), setdiff(names(x), g),
-                         deparse_args(list(condition = condition, dem_source = dem_source, res = res, buffer_m = buffer_m)),
+                         deparse_args(list(condition = condition, dem_source = dem_source, res = res, buffer_m = buffer_m,
+                                              depressions = depressions)),
                          note = if (condition) "imported polygons; DEM conditioned for topography and outlet slope" else "imported polygons")
   out <- new_ak_catchments(x, dplyr::bind_rows(attr(catchments, "ak_provenance"), prov), attr(catchments, "errors"))
   add_errors(out, errors, nrow(x))

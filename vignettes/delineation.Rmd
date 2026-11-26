@@ -118,14 +118,15 @@ For each point:
    any reference area).
 3. **Check there is elevation data at the point**; stop with a clear
    message if not.
-4. **Condition the DEM** with WhiteboxTools: least-cost breaching of
-   depressions (breach paths up to 100 cells; whatever can't be breached is
-   filled), then D8 flow directions and D8 flow accumulation.
+4. **Condition the DEM** with WhiteboxTools: depressions removed as
+   `depressions` says (breached, by default; section 2.3), then D8 flow
+   directions and D8 flow accumulation.
 5. **Snap the point** to a channel cell (contributing area at least
    `stream_threshold_km2`, 0.05 km²) within `snap_dist_m` (150 m).
 6. **Delineate** the area upstream of the snapped cell (`wbt_watershed`).
 7. **Is it complete?** If the catchment reaches the window's outer edge,
-   double the window and start again from step 2, up to `max_buffer_m`.
+   enlarge the window (section 2.5) and start again from step 2, up to
+   `max_buffer_m`.
 8. **Turn the raster catchment into a polygon**, compute diagnostics,
    compare with reference flowlines, and set flags.
 9. **Keep** the DEM, breached DEM, D8 pointer and accumulation, cropped to
@@ -207,22 +208,37 @@ A catchment that fits in a 30 km window keeps the full 5 m; one that needs
   in the state's index; projects whose units the index doesn't give are
   skipped.
 
-### 2.3 Conditioning: why breaching, and what it does to flats
+### 2.3 Conditioning: breaching or filling, and what it does to flats
 
 Real DEMs have pits: noise, road embankments, bridges, lakes, artifacts.
-Flow routing needs every cell to drain somewhere. Two strategies:
+Flow routing needs every cell to drain somewhere. `depressions` chooses
+how:
 
-- **Filling** raises pits to their spill level. It leaves large flat areas
-  where flow directions are arbitrary.
-- **Breaching** cuts a channel through the barrier along the least-cost
-  path (here up to 100 cells: 500 m at 5 m, 3 km at 30 m), then fills
-  what remains.
+- `"breach"` (default) cuts every depression's outlet channel down until
+  it drains (BreachDepressions, Lindsay 2016), after raising single-cell
+  pits (IfSAR speckle) to their lowest neighbour. Fastest.
+- `"least_cost"` cuts the channel that lowers the DEM least, up to 100
+  cells long (500 m at 5 m, 3 km at 30 m; BreachDepressionsLeastCost),
+  which suits culverts and road embankments; what that can't reach is
+  breached as above. About 4.5 times slower.
+- `"fill"` raises depressions to their spill level. It leaves large flat
+  areas where flow directions are arbitrary.
 
-Breaching is better for culverts and embankments (the usual cause of
-false barriers in road corridors) and changes far fewer cells. On genuinely
-flat ground (wetlands, outwash plains, drained lake basins) any D8
-direction is a guess either way; the `low_relief` flag marks catchments
-where that matters.
+```{r, eval = FALSE}
+d_lc <- ak_delineate(lat = 63.7255, lon = -148.9670, site_code = "SITE-001", depressions = "least_cost")
+compare_catchments(d$catchment, d_lc$catchment)
+```
+
+On IfSAR-like and real DEMs with noise added, breaching either way kept
+about as many catchments within IoU 0.95 of their noise-free version
+(88-89% on a real DEM); least-cost breaching did better on synthetic
+terrain full of closed depressions (84% against 78%), and filling worse
+(75-76%). Least-cost breaching took 4.5 times as long. The methods
+disagree most where large closed depressions (thermokarst, kettle lakes)
+or roads decide the drainage: compare `"breach"` and `"least_cost"` on
+such sites. On genuinely flat ground (wetlands, outwash plains, drained
+lake basins) any D8 direction is a guess whichever way; the `low_relief`
+flag marks catchments where that matters.
 
 D8 sends all flow from a cell to one of its eight neighbours. It is
 simple and reproducible, and it puts divides along cell edges; the
@@ -327,9 +343,23 @@ snaps below the junction, as with `"largest"`; it keeps the
 
 ### 2.5 Window growth, truncation and missing data
 
-The window doubles while the catchment touches its **outer edge**, up to
-`max_buffer_m` (100 km by default; CAKN-Data uses 60 km). A catchment
-still touching it is flagged `truncated` (a failure).
+While the catchment touches the window's **outer edge**, the sides it
+touches move out, each to twice its distance from the point (at least 2 km
+further), up to `max_buffer_m` (100 km by default; CAKN-Data uses 60 km).
+A catchment cut off by the first square goes straight to a window sized by
+a coarse pass: the same DEM at 100 m, delineated from the coarse cell with
+the most upstream area among those mostly inside the part already
+delineated, plus 1 km. So a large catchment takes two windows instead of one
+per doubling. The pass only sizes the window; where the full-resolution
+catchment still touches it (coarse and fine divides can part by several km
+in low relief), the touched sides move out by half the window. Windows
+longer than `max_cells` cells (6,000) coarsen to the next cell size of a
+ladder (6.25, 7.5, 10, 12.5, 15, 20 m ... for IfSAR),
+so nearby and repeated windows share their DEM tiles. A catchment still
+touching the window at `max_buffer_m` is flagged `truncated` (a failure).
+Each delineation records its window (`window_xmin` ... `window_ymax`,
+`window_plan`); passing them back as `window`, with `res = dem_res_m`,
+repeats it on the same grid.
 
 Missing elevation data inside the window is a different problem: the
 edge of the DEM's coverage (the Canadian border for IfSAR), the ocean, a
@@ -420,10 +450,10 @@ workers each use their own temporary names.
 | **Wrong branch at a confluence** | area too large (below the junction) or the other branch | `snap_ambiguous` with `snap_alt_area_km2`; `snap_off_stream`; `ref_area_km2` guides the snap | good when areas differ by more than 25%; two near-equal branches are caught by the flow-path test unless they join within the snap radius |
 | **A neighbouring stream within the snap radius** | a different catchment altogether | `snap_off_stream`; `snap_ambiguous` if the sizes differ | good; look at the plot |
 | **Stream smaller than the channel threshold** | `no_channel`, or a snap to a bigger stream | threshold lowered with `ref_area_km2`; lower `stream_threshold_km2` | deterministic |
-| **Flats, wetlands, lakes** | arbitrary flow directions, divides in the wrong place | breaching rather than filling; `low_relief`; `flowline_crossings` | `low_relief` thresholds are rules of thumb; such sites need a reference polygon |
+| **Flats, wetlands, lakes** | arbitrary flow directions, divides in the wrong place | breaching rather than filling; `low_relief`; `flowline_crossings`; compare `depressions` methods | `low_relief` thresholds are rules of thumb; such sites need a reference polygon |
 | **Braided and glacial outwash rivers** | channels that split and rejoin; divides on gravel bars | `flowline_crossings`, `low_relief` | weak: D8 can't represent distributary flow; use a hand-drawn polygon |
 | **Glaciers and ice fields** | surface divides on ice differ from where meltwater goes | none automatic; `ak_glaciers()` shows which catchments are glaciated | not detected: treat glaciated catchment areas with caution |
-| **Road embankments, bridges, culverts** | flow blocked or diverted along a road | least-cost breaching (up to 100 cells) | good for culverts; a long embankment can still divert flow: `flowline_crossings`, the plot |
+| **Road embankments, bridges, culverts** | flow blocked or diverted along a road | breaching; `depressions = "least_cost"` for the lowest-impact cut through an embankment | good for culverts with least-cost breaching; a long embankment can still divert flow: `flowline_crossings`, the plot |
 | **DEM artifacts** (IfSAR canopy, radar shadow, voids; Copernicus canopy) | odd channels in forest, divides through valleys | bare-earth IfSAR by default; `nodata_edge` for voids at the edge | partly; compare an IfSAR and a Copernicus delineation where in doubt |
 | **Coarse resolution closes narrow gorges** | area much too small, outlet in a slot canyon | full 5 m for windows up to 30 km; `dem_res_m` reported | see the example below; compare with a reference area |
 | **Window too small** | catchment cut off at a straight edge | automatic window growth; `truncated` | deterministic |

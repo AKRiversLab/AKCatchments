@@ -12,7 +12,8 @@ ak_catchments(
   cluster_km = NULL,
   plot = TRUE,
   plot_dir = "catchment_plots",
-  keep_delineations = FALSE
+  keep_delineations = FALSE,
+  checkpoint_dir = NULL
 )
 }
 \arguments{
@@ -42,6 +43,14 @@ for 5 m IfSAR).}
 \item{keep_delineations}{Also keep each full \code{ak_delineation} (streams,
 flowlines, snapped points) in \code{attr(x, "delineations")}, e.g. to redraw
 with \code{\link[=plot_catchment]{plot_catchment()}} and a reference outline.}
+
+\item{checkpoint_dir}{Folder in which each site's delineation is saved as
+soon as it finishes (by the worker that did it). A later call with the
+same site, coordinates and arguments, the same package version and the
+same WhiteboxTools reads it back instead of delineating again, so a long
+run that stops (interrupted, a crash, a power cut) resumes where it was;
+a site whose arguments changed, or whose kept rasters are gone, is
+delineated again. Failed sites are not saved. \code{NULL} (default): none.}
 }
 \value{
 An \code{ak_catchments} object: sf polygons (EPSG:3338), one row per

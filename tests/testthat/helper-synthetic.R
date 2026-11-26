@@ -18,6 +18,22 @@ synthetic_dem <- function(dir, res = 20) {
 
 xy_to_ll <- function(x, y) sf::st_coordinates(sf::st_transform(sf::st_sfc(sf::st_point(c(x, y)), crs = 3338), 4326))[1, ]
 
+# Synthetic long valley: an elliptical bowl (semi-axes 2.5 x 9 km) draining south through a gap, in a 30 x 30 km DEM
+# at 20 m, so a first window around the outlet cuts it off on the north side only.
+synthetic_valley <- function(dir, res = 20) {
+  xg <- 400000; y0 <- 1500000; a <- 2500; b <- 9000; yc <- y0 + 9000
+  x0 <- xg + res / 2
+  r <- terra::rast(terra::ext(xg - 15000, xg + 15000, y0 - 8000, y0 + 22000), resolution = res, crs = "EPSG:3338")
+  xy <- terra::crds(r)
+  zin <- 100 + 0.02 * (xy[, 2] - y0) + 0.1 * abs(xy[, 1] - x0)
+  rr <- sqrt(((xy[, 1] - x0) / a)^2 + ((xy[, 2] - yc) / b)^2)
+  gap <- abs(xy[, 1] - x0) < 3 * res & xy[, 2] < y0 + 400
+  terra::values(r) <- ifelse(rr < 1 | gap, zin, zin + 50 - 0.2 * (rr - 1) * a)
+  dir.create(dir, showWarnings = FALSE, recursive = TRUE)
+  terra::writeRaster(r, file.path(dir, "synthetic_valley.tif"), overwrite = TRUE)
+  list(dir = dir, x0 = x0, y0 = y0, area_km2 = pi * a * b / 1e6)
+}
+
 wbt_available <- function() isTRUE(suppressMessages(whitebox::wbt_init()))
 
 # Synthetic confluence: a main valley along x = xm draining south, joined at (xm, yj) by a tributary valley

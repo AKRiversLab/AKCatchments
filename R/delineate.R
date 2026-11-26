@@ -1,12 +1,30 @@
 #' Delineate the catchment draining to a stream point
 #'
 #' Fetches elevation data around the point, conditions it for flow routing
-#' (least-cost breaching, D8 directions and accumulation, WhiteboxTools),
+#' (depressions breached or filled, D8 directions and accumulation, WhiteboxTools),
 #' snaps the point onto the channel network, delineates the upstream area and
-#' runs the checks described in [delineation_flags]. The window grows (doubling)
-#' until the catchment no longer touches its edge; for very large windows the
-#' cell size coarsens so a window never exceeds `max_cells` a side, and the
-#' resolution actually used is reported in `dem_res_m`.
+#' runs the checks described in [delineation_flags].
+#'
+#' Window. The first window is a square of half-width `start_buffer_m`
+#' around the point, or `window` if given. While the catchment reaches the
+#' window's edge, only the sides it touches move out, each to twice its
+#' distance from the point (at least 2 km further), up to `max_buffer_m`.
+#' A catchment cut off by the first square instead gets a window sized by a
+#' quick pass over the same DEM at 100 m: the 100 m catchment of the lowest
+#' 100 m channel inside the part already delineated, plus 1 km. So a large
+#' catchment is conditioned twice, on the small square and on its own window,
+#' rather than once per doubling. The pass only sizes the window: the
+#' catchment is the full-resolution DEM's, and where it still touches that
+#' window, the touched sides move out by half its width or height.
+#' Where a window's long side is more than `max_cells` cells, the cell size
+#' coarsens to the next of 1.25, 1.5, 2, 2.5, 3, 4, 5, ... times the source's
+#' own (6.25, 7.5, 10, 12.5, 15, 20, 25 m for IfSAR), so windows of similar
+#' size share their DEM tiles. The cell size used is in `dem_res_m`, the window in
+#' `window_xmin`, `window_ymin`, `window_xmax`, `window_ymax` (EPSG:3338)
+#' and how it was chosen in `window_plan` (`"square"`, `"coarse"` or
+#' `"given"`). To repeat a delineation on the same grid (other snap radii,
+#' shifted points), pass those four values as `window` and `dem_res_m` as
+#' `res`.
 #'
 #' Snapping. A sample point rarely sits exactly on the DEM channel. Within
 #' `snap_dist_m` the point moves to a channel cell (contributing area of at
@@ -69,6 +87,25 @@
 #' @param site_code Identifier carried to the outputs and plot file name.
 #' @param ref_area_km2 Known catchment area to guide snapping, or `NA`.
 #' @param dem_source,res,dem_dir Passed to [ak_dem()].
+#' @param depressions How depressions are removed before flow routing
+#'   (WhiteboxTools):
+#'   * `"breach"` (default): every depression breached (BreachDepressions,
+#'     Lindsay 2016), single-cell pits raised first. Fastest.
+#'   * `"least_cost"`: least-cost breach paths up to 100 cells long
+#'     (BreachDepressionsLeastCost, Lindsay and Dhun 2015), the lowest-impact
+#'     cut through a road embankment or other narrow barrier; what that
+#'     leaves is breached as by `"breach"`, not filled. About 4.5 times
+#'     slower.
+#'   * `"fill"`: depressions filled to their spill level (FillDepressions),
+#'     the classic approach; flats then route arbitrarily.
+#'
+#'   In tests (IfSAR-like and real DEMs with noise added), `"breach"` and
+#'   `"least_cost"` kept about as many catchments within IoU 0.95 of their
+#'   noise-free version on a real DEM (88% and 89%), `"least_cost"` more on
+#'   synthetic terrain full of closed depressions (84% against 78%), and
+#'   `"fill"` fewer (76% and 75%). The methods disagree most where large
+#'   closed depressions (thermokarst, kettle lakes) or roads decide the
+#'   drainage; compare them there. Recorded in the `depressions` column.
 #' @param snap Snapping rule when `ref_area_km2` is missing: `"largest"`,
 #'   `"nearest"`, `"reference"` or `"consensus"` (see Snapping).
 #' @param snap_reference Reference stream network for `snap = "reference"`
@@ -92,8 +129,16 @@
 #' @param stream_threshold_km2 Contributing area that defines a channel.
 #' @param start_buffer_m First window half-width; defaults to
 #'   `max(5000, 2 * sqrt(ref_area))`.
-#' @param max_buffer_m Largest window half-width tried.
+#' @param max_buffer_m Largest distance from the point to any side of the
+#'   window.
 #' @param max_cells Largest window edge in cells; sets the coarsening.
+#' @param window The first window instead of the square of `start_buffer_m`:
+#'   an sf, sfc or bbox object (its bounding box), or `c(xmin, ymin, xmax,
+#'   ymax)` in EPSG:3338, used as given (extended only to hold the point and
+#'   its snap radius). The catchment should fit inside with room to spare,
+#'   e.g. `sf::st_buffer(hand_drawn_polygon, 2000)`; a window it reaches
+#'   grows as usual. `NULL` (default): the square, then the coarse pass or
+#'   side by side growth (see Window).
 #' @param flowlines Reference flowlines: an sf object, a source name for
 #'   [ak_flowlines()] (default `"3dhp"`), or `NULL` for none.
 #' @param plot Write the satellite-imagery check plot?
@@ -110,8 +155,8 @@
 #'   channels), `flowlines` (reference, if any) and `files`: the DEM,
 #'   breached DEM, D8 pointer and D8 accumulation of the final window,
 #'   cropped to the catchment plus a margin and kept in the cache's
-#'   `delineation/<site_code>/<dem>_<extent>/` folder, so runs with another
-#'   DEM or snap never overwrite them. Accumulation is computed on the whole
+#'   `delineation/<site_code>/<dem>_<depressions>_<extent>/` folder, so runs
+#'   with another DEM, depression method or snap never overwrite them. Accumulation is computed on the whole
 #'   window before cropping. [ak_topography()] and [ak_outlet_slope()] can
 #'   use these files directly (`files` is `NULL` with `keep_rasters = FALSE`).
 #'   With `snap_alternatives = TRUE` also
@@ -127,7 +172,10 @@
 #'   and `t_total_s`, with `n_windows` (windows tried) and `window_mode`
 #'   (`"site"`, or `"regional:<cluster>"` when the window was shared, in
 #'   which case the DEM and conditioning time is the shared time divided
-#'   among the cluster's sites). Use them to see where a run spends its time.
+#'   among the cluster's sites). Use them to see where a run spends its time;
+#'   for a long run, `options(AKCatchments.log = "stages.tsv")` also writes a
+#'   line as each stage of each site ends (time, process, site, stage,
+#'   seconds, detail), so an interrupted or slow run shows where it was.
 #' @seealso `vignette("delineation")` (download, use, uncertainty, validation)
 #' @export
 ak_delineate <- function(lat, lon, site_code = NA_character_, ref_area_km2 = NA_real_,
@@ -135,7 +183,8 @@ ak_delineate <- function(lat, lon, site_code = NA_character_, ref_area_km2 = NA_
                          snap_dist_m = 150, stream_threshold_km2 = 0.05, start_buffer_m = NULL,
                          max_buffer_m = 100000, max_cells = 6000, flowlines = "3dhp",
                          plot = TRUE, plot_dir = ".", fallback_dem = NULL, snap_reference = NULL,
-                         snap_reference_dist_m = 300, snap_alternatives = FALSE, keep_rasters = TRUE) {
+                         snap_reference_dist_m = 300, snap_alternatives = FALSE, keep_rasters = TRUE, window = NULL,
+                         depressions = c("breach", "least_cost", "fill")) {
   if (!is.null(fallback_dem) && !identical(fallback_dem, dem_source)) {
     args <- as.list(environment())[setdiff(names(formals(ak_delineate)), "fallback_dem")]
     first <- tryCatch(do.call(ak_delineate, args), error = \(e) e)
@@ -153,6 +202,7 @@ ak_delineate <- function(lat, lon, site_code = NA_character_, ref_area_km2 = NA_
     return(second)
   }
   snap <- match.arg(snap)
+  depressions <- match.arg(depressions)
   wbt_ready()
   t_start <- Sys.time()
   site_code <- if (is.na(site_code)) sprintf("pt_%.5f_%.5f", lat, lon) else site_code
@@ -162,33 +212,51 @@ ak_delineate <- function(lat, lon, site_code = NA_character_, ref_area_km2 = NA_
              error = \(e) { message(site_code, ": snap reference unavailable (", conditionMessage(e), "); flow path evidence only"); NULL })
   }
   res0 <- res %||% default_res(dem_source)
-  buf <- start_buffer_m %||% start_buffer(ref_area_km2, dem_source)
+  xy <- sf::st_coordinates(pt)[1, ]
+  win <- first_window(xy, window, start_buffer_m %||% start_buffer(ref_area_km2, dem_source), snap_dist_m, max_buffer_m)
+  plan <- if (is.null(window)) "square" else "given"
   wd <- tempfile("akdelin_")
   dir.create(wd)
   on.exit(unlink(wd, recursive = TRUE), add = TRUE)
   tt <- c(dem = 0, condition = 0, watershed = 0)
   n_windows <- 0L
+  stage_log(site_code, "start", t_start, sprintf("%s, %s, snap %s %g m", dem_source, depressions, snap, snap_dist_m))
   repeat {
     n_windows <- n_windows + 1L
-    r <- if (is.na(res0)) NULL else max(res0, 2 * buf / max_cells)
     t0 <- Sys.time()
-    dem <- ak_dem(sf::st_buffer(pt, buf), dem_source, res = r, dir = dem_dir)
+    dem <- ak_dem(window_aoi(win), dem_source, res = window_res(res0, win, max_cells), dir = dem_dir)
     check_dem_at(dem, pt, site_code, lat, lon, dem_source)
+    got <- window_of(dem)
     tt["dem"] <- tt["dem"] + since(t0)
+    stage_log(site_code, paste("window", n_windows, "dem"), t0, window_text(got, dem))
     t0 <- Sys.time()
-    f <- ak_condition(dem, wd)
+    f <- ak_condition(dem, wd, depressions)
     tt["condition"] <- tt["condition"] + since(t0)
+    stage_log(site_code, paste("window", n_windows, "condition"), t0)
     t0 <- Sys.time()
     w <- outlet_watershed(pt, f, wd, snap_dist_m, ref_area_km2, stream_threshold_km2, snap, reaches)
     tt["watershed"] <- tt["watershed"] + since(t0)
-    if (!w$truncated || buf >= max_buffer_m) break
-    buf <- min(buf * 2, max_buffer_m)
-    message(site_code, ": catchment reached the window edge; widening to ", buf / 1000, " km")
+    stage_log(site_code, paste("window", n_windows, "watershed"), t0,
+              paste("edges touched:", if (length(w$sides)) paste(w$sides, collapse = "") else "none"))
+    # stop when the catchment fits, or when the window could not get any larger (the DEM's coverage ends there)
+    if (!w$truncated || (n_windows > 1 && isTRUE(all.equal(got, win_prev)))) break
+    win_prev <- got
+    t0 <- Sys.time()
+    nxt <- if (n_windows == 1 && is.null(window)) coarse_window(got, w, dem_source, dem_dir, xy, max_buffer_m, wd, depressions)
+    if (!is.null(nxt)) {
+      plan <- "coarse"
+      tt["dem"] <- tt["dem"] + since(t0)
+      stage_log(site_code, "coarse pass", t0, window_text(nxt))
+    } else nxt <- grow_window(got, w$sides, xy, max_buffer_m, by = if (plan == "coarse") 0.5)
+    if (is.null(nxt)) break
+    win <- nxt
+    message(site_code, ": catchment reached the window edge (", paste(w$sides, collapse = ", "), "); window now ",
+            window_text(win), if (identical(plan, "coarse") && n_windows == 1) " (from a 100 m pass over the same DEM)")
   }
-  finish_delineation(site_code, lat, lon, ref_area_km2, pt, w, f, dem, wd, buf = buf, snap_dist_m = snap_dist_m,
+  finish_delineation(site_code, lat, lon, ref_area_km2, pt, w, f, dem, wd, win = got, plan = plan, snap_dist_m = snap_dist_m,
                      stream_threshold_km2 = stream_threshold_km2, flowlines = flowlines, plot = plot, plot_dir = plot_dir,
                      times = tt, n_windows = n_windows, window_mode = "site", t_start = t_start, snap_alternatives = snap_alternatives,
-                     keep_rasters = keep_rasters)
+                     keep_rasters = keep_rasters, depressions = depressions)
 }
 
 since <- function(t0) as.numeric(difftime(Sys.time(), t0, units = "secs"))
@@ -204,6 +272,103 @@ start_buffer <- function(ref_area_km2, dem_source = "ifsar") {
   max(if (dem_source %in% c("lidar", "best")) 2000 else 5000, 2 * sqrt(ref_area_km2 * 1e6), na.rm = TRUE)
 }
 
+# Windows are c(xmin, ymin, xmax, ymax) in EPSG:3338.
+# The first: the square of half-width buf around the point, or the given extent, holding the point's snap radius
+# (and a margin) and no side further than max_buffer_m from the point
+first_window <- function(xy, window, buf, snap_dist_m, max_buffer_m) {
+  if (is.null(window)) {
+    b <- min(buf, max_buffer_m)
+    return(c(xmin = xy[[1]] - b, ymin = xy[[2]] - b, xmax = xy[[1]] + b, ymax = xy[[2]] + b))
+  }
+  bb <- if (inherits(window, c("sf", "sfc", "bbox"))) {
+    sf::st_bbox(sf::st_transform(sf::st_as_sfc(sf::st_bbox(window)), akalbers_crs()))[c("xmin", "ymin", "xmax", "ymax")]
+  } else stats::setNames(as.numeric(window), c("xmin", "ymin", "xmax", "ymax"))
+  need <- snap_dist_m + 500
+  c(xmin = max(min(bb[["xmin"]], xy[[1]] - need), xy[[1]] - max_buffer_m), ymin = max(min(bb[["ymin"]], xy[[2]] - need), xy[[2]] - max_buffer_m),
+    xmax = min(max(bb[["xmax"]], xy[[1]] + need), xy[[1]] + max_buffer_m), ymax = min(max(bb[["ymax"]], xy[[2]] + need), xy[[2]] + max_buffer_m))
+}
+
+window_aoi <- function(win) sf::st_as_sfc(sf::st_bbox(win, crs = sf::st_crs(akalbers_crs())))
+
+window_of <- function(dem) {
+  e <- as.vector(terra::ext(dem))
+  c(xmin = e[["xmin"]], ymin = e[["ymin"]], xmax = e[["xmax"]], ymax = e[["ymax"]])
+}
+
+window_text <- function(win, dem = NULL) {
+  paste0(sprintf("%.1f x %.1f km", (win[["xmax"]] - win[["xmin"]]) / 1000, (win[["ymax"]] - win[["ymin"]]) / 1000),
+         if (!is.null(dem)) sprintf(" at %g m (%.1f M cells)", terra::res(dem)[1], terra::ncell(dem) / 1e6))
+}
+
+# Cell size for a window: the source's own (res0), or where the window's long side is more than max_cells of those,
+# the smallest of 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, ... times it that fits. A ladder rather than any value, so
+# windows of similar size (a site's windows as they grow, nearby sites, reruns) share their image-service tiles; at
+# most a third coarser than the window needs.
+window_res <- function(res0, win, max_cells) {
+  if (is.na(res0)) return(NULL)
+  side <- max(win[["xmax"]] - win[["xmin"]], win[["ymax"]] - win[["ymin"]])
+  steps <- c(1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8) * rep(10^(0:3), each = 10)
+  res0 * steps[which(res0 * steps * max_cells >= side - 1e-6)[1]]
+}
+
+# The window with each side the catchment touches moved out to twice its distance from the point, or with `by`, by
+# that share of the window's width or height (after the coarse pass: the catchment overruns that window where the
+# coarse and full-resolution divides part, often by several km); at least 2 km further either way, and no further
+# than max_buffer_m. NULL when none of those sides can move.
+grow_window <- function(win, sides, xy, max_buffer_m, by = NULL) {
+  d <- c(w = xy[[1]] - win[["xmin"]], s = xy[[2]] - win[["ymin"]], e = win[["xmax"]] - xy[[1]], n = win[["ymax"]] - xy[[2]])
+  size <- c(w = win[["xmax"]] - win[["xmin"]], s = win[["ymax"]] - win[["ymin"]], e = win[["xmax"]] - win[["xmin"]], n = win[["ymax"]] - win[["ymin"]])
+  step <- if (is.null(by)) d else by * size
+  new <- d
+  new[sides] <- pmin(d[sides] + pmax(step[sides], 2000), max_buffer_m)
+  if (all(new[sides] <= d[sides] + 1e-6)) return(NULL)
+  c(xmin = xy[[1]] - new[["w"]], ymin = xy[[2]] - new[["s"]], xmax = xy[[1]] + new[["e"]], ymax = xy[[2]] + new[["n"]])
+}
+
+# After the first square cuts the catchment off: a window over the catchment the same DEM gives at res_c (a quick
+# pass: a 40 km square at 100 m is 160,000 cells, doubled while that catchment reaches its edge, up to max_buffer_m),
+# plus margin_m, joined to the current window. The coarse outlet is the coarse cell with the most upstream area among
+# those mostly inside the part of the catchment delineated so far, so the coarse catchment is this one and not a
+# neighbouring river's. NULL when no coarse cell is mostly inside that part (or for lidar, whose windows a project
+# bounds), and the window then grows side by side.
+coarse_window <- function(win, w, dem_source, dem_dir, xy, max_buffer_m, wd, depressions, res_c = 100, margin_m = 1000) {
+  if (identical(dem_source, "lidar")) return(NULL)
+  cwd <- file.path(wd, "coarse")
+  dir.create(cwd, showWarnings = FALSE)
+  half <- min(20000, max_buffer_m)
+  prev <- NULL
+  repeat {
+    dem <- ak_dem(window_aoi(c(xmin = xy[[1]] - half, ymin = xy[[2]] - half, xmax = xy[[1]] + half, ymax = xy[[2]] + half)),
+                  if (identical(dem_source, "best")) "ifsar" else dem_source, res = res_c, dir = dem_dir)
+    if (isTRUE(all.equal(window_of(dem), prev))) break                      # the DEM's coverage ends: no larger pass
+    prev <- window_of(dem)
+    f <- ak_condition(dem, cwd, depressions)
+    acc <- terra::rast(f$accum)
+    share <- terra::resample(!is.na(w$ws), acc, method = "average")          # of each coarse cell, inside the part
+    acc[is.na(share) | share < 0.5] <- NA
+    if (all(is.na(terra::values(acc)))) return(NULL)
+    outlet <- sf::st_sfc(sf::st_point(terra::xyFromCell(acc, which.max(terra::values(acc)[, 1]))[1, ]), crs = akalbers_crs())
+    ws <- watershed_raster(outlet, f, cwd, tag = "coarse")
+    if (!touches_frame(ws) || half >= max_buffer_m) break
+    half <- min(2 * half, max_buffer_m)
+  }
+  b <- window_of(terra::trim(ws))
+  c(xmin = max(min(win[["xmin"]], b[["xmin"]] - margin_m), xy[[1]] - max_buffer_m),
+    ymin = max(min(win[["ymin"]], b[["ymin"]] - margin_m), xy[[2]] - max_buffer_m),
+    xmax = min(max(win[["xmax"]], b[["xmax"]] + margin_m), xy[[1]] + max_buffer_m),
+    ymax = min(max(win[["ymax"]], b[["ymax"]] + margin_m), xy[[2]] + max_buffer_m))
+}
+
+# One line per finished stage of a delineation, in the file named by options(AKCatchments.log): where a long run is,
+# and how long each stage took
+stage_log <- function(site_code, stage, t0, detail = "") {
+  f <- getOption("AKCatchments.log")
+  if (is.null(f)) return(invisible())
+  try(cat(sprintf("%s\t%d\t%s\t%s\t%.1f\t%s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), Sys.getpid(), site_code, stage, since(t0), detail),
+          file = f, append = TRUE), silent = TRUE)
+  invisible()
+}
+
 check_dem_at <- function(dem, pt, site_code, lat, lon, dem_source) {
   if (is.na(terra::extract(dem, terra::vect(sf::st_transform(pt, terra::crs(dem))))[1, 2])) {
     stop(site_code, ": no elevation data at ", round(lat, 5), ", ", round(lon, 5), " from the ", dem_source,
@@ -217,14 +382,16 @@ outlet_watershed <- function(pt, f, wd, snap_dist_m, ref_area_km2, stream_thresh
   snapped$snap_path_ok <- if (snapped$snap_method == "none") NA else
     same_stream(f$pointer, sf::st_coordinates(pt)[1, ], sf::st_coordinates(snapped)[1, ], snap_dist_m)
   ws <- watershed_raster(snapped, f, wd, tag = pt$site_code)
-  list(snapped = snapped, ws = ws, truncated = touches_frame(ws))
+  sides <- frame_sides(ws)
+  list(snapped = snapped, ws = ws, sides = sides, truncated = length(sides) > 0)
 }
 
 # From a watershed raster to the ak_delineation: polygon, channels, reference flowlines, diagnostics, flags,
-# the rasters kept in the cache (unless keep_rasters = FALSE), and the check plot
-finish_delineation <- function(site_code, lat, lon, ref_area_km2, pt, w, f, dem, wd, buf, snap_dist_m, stream_threshold_km2,
+# the rasters kept in the cache (unless keep_rasters = FALSE), and the check plot. `win`: the window (window_of()),
+# `plan`: how it was chosen.
+finish_delineation <- function(site_code, lat, lon, ref_area_km2, pt, w, f, dem, wd, win, plan, snap_dist_m, stream_threshold_km2,
                                flowlines, plot, plot_dir, times, n_windows, window_mode, t_start, snap_alternatives = FALSE,
-                               keep_rasters = TRUE) {
+                               keep_rasters = TRUE, depressions = "breach") {
   t0 <- Sys.time()
   ws <- w$ws
   snapped <- w$snapped
@@ -236,18 +403,24 @@ finish_delineation <- function(site_code, lat, lon, ref_area_km2, pt, w, f, dem,
   streams <- (f$streams %||% dem_streams(f, stream_threshold_km2, wd)) |>
     sf::st_filter(sf::st_buffer(poly, 10 * terra::res(dem)[1]))
   alternatives <- if (snap_alternatives) snap_alternative_polygons(snapped, f, wd, site_code)
-  files <- if (keep_rasters) save_rasters(f, poly, site_code, dem_source(dem))
+  files <- if (keep_rasters) save_rasters(f, poly, site_code, dem_source(dem), depressions)
   t_finish <- since(t0)
+  stage_log(site_code, "finish", t0)
   t0 <- Sys.time()
   ref <- if (is.character(flowlines)) {
     tryCatch(ak_flowlines(sf::st_buffer(poly, 500), flowlines),
              error = \(e) { message("Reference flowlines unavailable: ", conditionMessage(e)); NULL })
   } else flowlines
   t_flow <- since(t0)
+  stage_log(site_code, "flowlines", t0, if (is.character(flowlines)) paste(NROW(ref), flowlines, "lines") else "")
+  xy <- sf::st_coordinates(pt)[1, ]
   catchment <- dplyr::bind_cols(
     dplyr::tibble(site_code = site_code, lat = lat, lon = lon, ref_area_km2 = ref_area_km2,
                   dem_source = dem_source(dem), dem_res_m = terra::res(dem)[1], dem_project = dem_tag(dem, "lidar_project"),
-                  window_m = buf, truncated = w$truncated,
+                  depressions = depressions,
+                  window_m = max(xy[[1]] - win[["xmin"]], win[["xmax"]] - xy[[1]], xy[[2]] - win[["ymin"]], win[["ymax"]] - xy[[2]]),
+                  window_xmin = win[["xmin"]], window_ymin = win[["ymin"]], window_xmax = win[["xmax"]], window_ymax = win[["ymax"]],
+                  window_plan = plan, truncated = w$truncated,
                   nodata_edge = nodata),
     sf::st_drop_geometry(snapped),
     catchment_diagnostics(poly, dem, snapped),
@@ -260,6 +433,7 @@ finish_delineation <- function(site_code, lat, lon, ref_area_km2, pt, w, f, dem,
   if (plot) {
     dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
     out$plot_file <- plot_catchment(out, file = file.path(plot_dir, paste0(site_code, ".png")))
+    stage_log(site_code, "plot", t0)
   }
   tm <- c(t_dem_s = times[["dem"]], t_condition_s = times[["condition"]], t_watershed_s = times[["watershed"]],
           t_finish_s = t_finish, t_flowlines_s = t_flow, t_plot_s = since(t0))
@@ -276,8 +450,11 @@ finish_delineation <- function(site_code, lat, lon, ref_area_km2, pt, w, f, dem,
 print.ak_delineation <- function(x, ...) {
   c1 <- x$catchment
   cat("<ak_delineation>", c1$site_code, "\n")
-  cat(sprintf("  area %.3f km2 | DEM %s | snap %s, %.0f m | window %.0f km\n",
-              c1$area_km2, c1$dem_source, c1$snap_method, c1$snap_dist_m, c1$window_m / 1000))
+  win <- if (is.null(c1$window_xmin)) sprintf("%.0f km", c1$window_m / 1000) else      # objects from before 0.2.0.9002
+    sprintf("%s (%s, %d tried)", window_text(c(xmin = c1$window_xmin, ymin = c1$window_ymin, xmax = c1$window_xmax, ymax = c1$window_ymax)),
+            c1$window_plan, c1$n_windows)
+  cat(sprintf("  area %.3f km2 | DEM %s | snap %s, %.0f m | window %s\n", c1$area_km2,
+              paste(c(c1$dem_source, c1$depressions), collapse = ", "), c1$snap_method, c1$snap_dist_m, win))
   cat("  delin_ok:", c1$delin_ok, "| flags:", if (nzchar(c1$flags)) c1$flags else "none", "\n")
   if (!is.null(x$plot_file)) cat("  plot:", x$plot_file, "\n")
   invisible(x)
@@ -290,14 +467,38 @@ wbt_ready <- function() {
   whitebox::wbt_options(verbose = FALSE)
 }
 
-ak_condition <- function(dem, dir) {
-  f <- stats::setNames(file.path(dir, c("dem.tif", "breached.tif", "d8_pointer.tif", "d8_accum.tif")),
+ak_condition <- function(dem, dir, depressions = "breach") {
+  f <- stats::setNames(as.list(file.path(dir, c("dem.tif", "breached.tif", "d8_pointer.tif", "d8_accum.tif"))),
                        c("dem", "filled", "pointer", "accum"))
-  terra::writeRaster(dem, f[["dem"]], overwrite = TRUE, NAflag = -9999, datatype = "FLT4S")
-  whitebox::wbt_breach_depressions_least_cost(f[["dem"]], f[["filled"]], dist = 100, fill = TRUE)
-  whitebox::wbt_d8_pointer(f[["filled"]], f[["pointer"]])
-  whitebox::wbt_d8_flow_accumulation(f[["filled"]], f[["accum"]], out_type = "cells")
-  as.list(f)
+  terra::writeRaster(dem, f$dem, overwrite = TRUE, NAflag = -9999, datatype = "FLT4S")
+  wbt_condition(f, depressions)
+}
+
+# Depressions removed as `depressions` says (see ak_delineate()), then D8 pointer and D8 accumulation of f$dem into
+# f$filled, f$pointer and f$accum. Least-cost breaching hands what it cannot reach to complete breaching rather than to
+# its own filling step, which, like FillDepressions, now and then panics under load (it takes its raster back before
+# every thread has let go: "Error unwrapping 'output'"); so every method gets three tries, which filling may need.
+# WhiteboxTools reports a failed tool only in a message, so the old outputs go first (a window must never be routed on
+# the last window's rasters) and a missing output stops the run.
+wbt_condition <- function(f, depressions = "breach") {
+  out <- c(f$filled, f$pointer, f$accum)
+  lc <- sub("\\.tif$", "_least_cost.tif", f$filled)
+  unlink(c(out, lc))
+  for (i in 1:3) if (!file.exists(f$filled)) switch(depressions,
+    breach = whitebox::wbt_breach_depressions(f$dem, f$filled, fill_pits = TRUE),
+    least_cost = {
+      whitebox::wbt_breach_depressions_least_cost(f$dem, lc, dist = 100, fill = FALSE)
+      whitebox::wbt_breach_depressions(lc, f$filled, fill_pits = TRUE)
+    },
+    fill = whitebox::wbt_fill_depressions(f$dem, f$filled, fix_flats = TRUE))
+  unlink(lc)
+  whitebox::wbt_d8_pointer(f$filled, f$pointer)
+  whitebox::wbt_d8_flow_accumulation(f$filled, f$accum, out_type = "cells")
+  if (!all(file.exists(out))) {
+    stop("WhiteboxTools did not write ", paste(basename(out[!file.exists(out)]), collapse = ", "), " in ", dirname(f$dem),
+         " (its messages above say why)", call. = FALSE)
+  }
+  f
 }
 
 snap_point <- function(pt, accum_file, snap_dist_m, ref_km2, threshold_km2, snap, pointer_file = NULL, reaches = NULL) {
@@ -347,14 +548,17 @@ same_stream <- function(pointer_file, pt_xy, out_xy, snap_dist_m) {
   match(meet, po) == 1 || match(meet, pp) <= ceiling(snap_dist_m / cs) + 1
 }
 
-# Does the watershed reach the outer rows or columns of the window?
-touches_frame <- function(ws) {
+# Which outer rows or columns of the window the watershed reaches: "w", "s", "e", "n"
+frame_sides <- function(ws) {
   nr <- terra::nrow(ws)
   nc <- terra::ncol(ws)
-  frame <- unique(c(terra::cellFromRowCol(ws, 1, seq_len(nc)), terra::cellFromRowCol(ws, nr, seq_len(nc)),
-                    terra::cellFromRowCol(ws, seq_len(nr), 1), terra::cellFromRowCol(ws, seq_len(nr), nc)))
-  any(!is.na(ws[frame][, 1]))
+  hit <- \(cells) any(!is.na(ws[cells][, 1]))
+  sides <- c(w = hit(terra::cellFromRowCol(ws, seq_len(nr), 1)), s = hit(terra::cellFromRowCol(ws, nr, seq_len(nc))),
+             e = hit(terra::cellFromRowCol(ws, seq_len(nr), nc)), n = hit(terra::cellFromRowCol(ws, 1, seq_len(nc))))
+  names(sides)[sides]
 }
+
+touches_frame <- function(ws) length(frame_sides(ws)) > 0
 
 # Does the watershed border cells without elevation data (other than near the outlet, where the sea or
 # a lake may legitimately start)? Widening the window cannot fix that, so it is reported, not chased.
@@ -369,13 +573,13 @@ nodata_contact <- function(ws, dem, snapped, tol_m) {
 }
 
 # Keep the window's rasters for later use (topography, outlet slope, plots), cropped to the catchment plus
-# a margin and compressed, in a folder named by DEM and extent so different runs never collide
-save_rasters <- function(f, poly, site_code, dem_tag) {
+# a margin and compressed, in a folder named by DEM, depression method and extent so different runs never collide
+save_rasters <- function(f, poly, site_code, dem_tag, depressions = "breach") {
   r <- terra::rast(f$dem)
   margin <- max(500, 0.15 * sqrt(as.numeric(sf::st_area(poly))), 10 * terra::res(r)[1])
   e <- terra::intersect(terra::align(terra::ext(terra::vect(sf::st_buffer(poly, margin))), r), terra::ext(r))
   v <- as.vector(e)
-  key <- sprintf("%s_%.0f_%.0f_%.0fx%.0f", gsub("[^A-Za-z0-9.]+", "_", dem_tag %||% "dem"), v[["xmin"]], v[["ymin"]],
+  key <- sprintf("%s_%s_%.0f_%.0f_%.0fx%.0f", gsub("[^A-Za-z0-9.]+", "_", dem_tag %||% "dem"), depressions, v[["xmin"]], v[["ymin"]],
                  v[["xmax"]] - v[["xmin"]], v[["ymax"]] - v[["ymin"]])
   keep <- ak_cache_dir("delineation", gsub("[^A-Za-z0-9._-]+", "_", site_code), key)
   out <- stats::setNames(file.path(keep, c("dem.tif", "dem_breached.tif", "d8_pointer.tif", "d8_accum.tif")),
@@ -392,6 +596,7 @@ watershed_raster <- function(snapped, f, dir, tag = "outlet") {
   pp <- file.path(dir, paste0("pour_point_", tag, ".shp"))
   sf::st_write(sf::st_sf(id = 1L, geometry = sf::st_geometry(snapped)), pp, delete_dsn = file.exists(pp), quiet = TRUE)
   out <- file.path(dir, paste0("watershed_", tag, ".tif"))
+  unlink(out)                                                     # not the last window's, if WhiteboxTools fails
   whitebox::wbt_watershed(f$pointer, pp, out)
   ws <- terra::rast(out)
   terra::crs(ws) <- terra::crs(terra::rast(f$dem))

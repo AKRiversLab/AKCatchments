@@ -1,4 +1,79 @@
-# AKCatchments 0.2.0.9000 (development)
+# AKCatchments 0.2.0.9005 (development)
+
+Built on 0.2.0.9000. It does not include the 0.2.0.9001 edits made elsewhere, which were never run. 0.2.0.9002 to
+0.2.0.9004 were never run either: 0.2.0.9002 sized windows from GEOGLOWS upstream footprints (replaced here by a coarse
+pass over the same DEM), 0.2.0.9003 kept least-cost breaching, and 0.2.0.9004 switched to complete breaching without a
+choice.
+
+## Faster delineation of large catchments
+
+* Windows grow on the sides the catchment touches, not all four: each touched
+  side moves out to twice its distance from the point (at least 2 km), up to
+  `max_buffer_m`. An elongated catchment no longer pays for a square around
+  its outlet.
+* A catchment cut off by the first square gets a window sized by a coarse
+  pass: the same DEM at 100 m (a 40 km square is 160,000 cells, doubled
+  while that catchment reaches its edge), delineated from the coarse cell
+  with the most upstream area among those mostly inside the part already
+  delineated; its bounding box plus 1 km. A large catchment is then
+  conditioned twice instead of at every doubling (3 to 6 windows of up to 36
+  million cells before), and no reference network is needed. The pass only
+  sizes the window: the catchment is the full-resolution DEM's, and where it
+  still touches that window (where coarse and full-resolution divides part,
+  often by several km), the touched sides move out by half the window's
+  width or height. Lidar windows, which a project bounds, grow side by side.
+* Coarsened cell sizes come from a ladder (1.25, 1.5, 2, 2.5, 3, 4, 5, ...
+  times the source's: 6.25, 7.5, 10, 12.5, 15, 20, 25 m for IfSAR) instead of
+  any value, so a growing window, nearby sites and reruns reuse the same
+  image-service tiles rather than downloading a new set at a new cell size
+  each time; a window is at most a third coarser than it needs to be.
+* A window that cannot get any larger (the DEM's coverage ends) is no longer
+  fetched and conditioned again at every widening.
+* New `ak_delineate(window = )`: the first window, given (a reference
+  polygon's bounding box with a margin, or another run's window). Every
+  delineation now records its window (`window_xmin`, `window_ymin`,
+  `window_xmax`, `window_ymax`, EPSG:3338) and `window_plan` (`"square"`,
+  `"coarse"`, `"given"`); `window` and `res = dem_res_m` repeat it on the same
+  grid. In regional windows each point's `window` is part of the shared one.
+* `ak_catchments(checkpoint_dir = )` saves each site as soon as it finishes and
+  reads it back on a rerun with the same arguments, package and
+  WhiteboxTools versions, so an interrupted run resumes.
+* `options(AKCatchments.log = file)` writes one line per finished stage of
+  every delineation (workers too): site, stage, seconds, window size and cell
+  size, edges touched, number of reference flowlines.
+* New `depressions` argument (`ak_delineate()`, so `ak_catchments()`, and
+  `import_catchments()`): `"breach"` (default) breaches every depression
+  (WhiteboxTools BreachDepressions, Lindsay 2016; single-cell pits raised
+  first); `"least_cost"` cuts least-cost breach paths of up to 100 cells
+  (BreachDepressionsLeastCost) and breaches what is left instead of filling
+  it; `"fill"` fills (FillDepressions). The method is recorded in the new
+  `depressions` column, the regional path only shares a window between
+  sites with the same method, and kept rasters (`delineation/<site>/`,
+  `scratch/<site>/`) are named by method, so rasters conditioned another
+  way are never reused, including those of earlier versions.
+* The default was least-cost breaching with filling of what it left.
+  Conditioning a 16-million-cell IfSAR-like DEM took 29 s with
+  `"breach"`, 135 s with `"least_cost"` and 133 s with the old default. A
+  shorter least-cost search is nearly as fast (34 s at 25 cells) but fills
+  more, and filled flats made catchments less stable. Share of catchments
+  within IoU 0.95 of their noise-free version, on a real DEM (Cumberland
+  Mountains, 80 m cells, 1 m noise added): `"breach"` 88%,
+  `"least_cost"` 89%, old default 89%, 25-cell search 77%, `"fill"` 76%;
+  on synthetic IfSAR-like terrain full of closed depressions (5 m, 0.4 m
+  noise): 78%, 84%, 85%, 75%, 75%. WhiteboxTools' filling step (in the old
+  default and FillDepressions) also panics now and then under load: it
+  takes its raster back before every thread has let go. `"breach"` and
+  `"least_cost"` never run it; `"fill"` gets three tries. Results change
+  wherever methods route a depression differently, most where large closed
+  depressions decide the drainage.
+* A WhiteboxTools tool that fails no longer goes unnoticed. The whitebox
+  package only prints a message, so a failed breaching left the last
+  window's rasters in place and the delineation carried on with them (a
+  wrong window, or one grown for nothing). Old outputs are now removed
+  before each run and a missing one stops the run with its name.
+* Results differ slightly from 0.2.0.9000 where a catchment needed a larger
+  window: windows and their cell sizes are different (usually smaller and
+  finer).
 
 ## Breaking: one function per dataset, layers append to the catchments
 

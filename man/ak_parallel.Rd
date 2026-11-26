@@ -9,7 +9,12 @@ Every function that loops over sites shows a progress bar naming the
 site it is on (in scripts and knitr the bar is printed every few
 seconds; \code{options(AKCatchments.progress = FALSE)} turns bars off). Set \code{options(AKCatchments.verbose = TRUE)} to
 also get one line per finished site with its time, which is what you want
-in the log of a long batch job. A failure at one site is recorded in
+in the log of a long batch job, and \code{options(AKCatchments.log = file)}
+for a tab-separated line as each stage of each delineation ends (DEM
+window, conditioning, watershed, flowlines, plot; workers included), so a
+slow or interrupted run shows which site and stage it was in. A
+long \code{\link[=ak_catchments]{ak_catchments()}} run can also save each site as it finishes
+(\code{checkpoint_dir}) and resume from them. A failure at one site is recorded in
 \code{attr(x, "errors")} (\code{site_code}, \code{step}, \code{error}) and does not stop the
 others.
 }

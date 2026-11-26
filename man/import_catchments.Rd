@@ -11,7 +11,8 @@ import_catchments(
   res = NULL,
   dem_dir = NULL,
   buffer_m = 500,
-  refresh = FALSE
+  refresh = FALSE,
+  depressions = c("breach", "least_cost", "fill")
 )
 }
 \arguments{
@@ -25,11 +26,14 @@ import_catchments(
 \item{buffer_m}{Margin around each catchment, metres.}
 
 \item{refresh}{Rebuild cached files?}
+
+\item{depressions}{How depressions are removed: \code{"breach"},
+\code{"least_cost"} or \code{"fill"}, as in \code{\link[=ak_delineate]{ak_delineate()}}.}
 }
 \value{
 An \code{ak_catchments} object: the polygons with their columns (and
 any provenance they already carry, with a row for the import added),
-\code{area_km2}, and (with \code{condition}) \code{dem_source}, \code{dem_res_m} and the
+\code{area_km2}, and (with \code{condition}) \code{dem_source}, \code{dem_res_m}, \code{depressions} and the
 raster paths \code{dem_file}, \code{filled_file}, \code{pointer_file}, \code{accum_file}.
 Sites whose DEM fails keep their polygon, without raster paths, and are
 listed in \code{attr(x, "errors")}.
@@ -39,8 +43,8 @@ For catchments you did not delineate with \code{\link[=ak_catchments]{ak_catchme
 polygons, StreamStats or gaged-basin boundaries, or polygons from another
 tool. Checks them (one valid polygon per unique \code{site_code}), fetches the
 DEM for each polygon plus \code{buffer_m}, masks it to that buffer and
-conditions it for flow routing (least-cost breaching, D8 pointer and
-accumulation), so \code{\link[=ak_topography]{ak_topography()}} and \code{\link[=ak_outlet_slope]{ak_outlet_slope()}} work on them
+conditions it for flow routing (depressions breached or filled, D8
+pointer and accumulation), so \code{\link[=ak_topography]{ak_topography()}} and \code{\link[=ak_outlet_slope]{ak_outlet_slope()}} work on them
 as on delineated catchments. Returns the same kind of object as
 \code{\link[=ak_catchments]{ak_catchments()}}, ready for every layer function.
 }
@@ -49,9 +53,11 @@ The conditioned rasters are cached in the cache's \verb{scratch/<site_code>/}
 folder, named by DEM source (and by \code{res} and \code{buffer_m} when these are
 not the defaults), so reruns reuse them. With the defaults the files are
 named as in the geo workflow (\code{dem_tiles.tif} for local tiles,
-\code{dem_elevatr_z12.tif} for elevatr), so its windows are reused. Breaching
-is used rather than filling because filled flats give arbitrary flow
-directions, which would corrupt the upstream walk in \code{\link[=ak_outlet_slope]{ak_outlet_slope()}}.
+\code{dem_elevatr_z12.tif} for elevatr), so its windows are reused; the
+conditioned rasters also carry the depression method in their names.
+Breaching is the default rather than filling because filled flats give
+arbitrary flow directions, which would corrupt the upstream walk in
+\code{\link[=ak_outlet_slope]{ak_outlet_slope()}}.
 
 Polygons only, without the DEM (\code{condition = FALSE}), is enough for every
 layer except topography and outlet slope.

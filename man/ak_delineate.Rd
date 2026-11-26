@@ -25,7 +25,9 @@ ak_delineate(
   snap_reference = NULL,
   snap_reference_dist_m = 300,
   snap_alternatives = FALSE,
-  keep_rasters = TRUE
+  keep_rasters = TRUE,
+  window = NULL,
+  depressions = c("breach", "least_cost", "fill")
 )
 }
 \arguments{
@@ -47,7 +49,8 @@ ak_delineate(
 \item{start_buffer_m}{First window half-width; defaults to
 \code{max(5000, 2 * sqrt(ref_area))}.}
 
-\item{max_buffer_m}{Largest window half-width tried.}
+\item{max_buffer_m}{Largest distance from the point to any side of the
+window.}
 
 \item{max_cells}{Largest window edge in cells; sets the coarsening.}
 
@@ -86,6 +89,35 @@ hundred MB for one of thousands of km2. Use \code{FALSE} when only the
 polygon is needed (repeated or sensitivity runs); \code{files} is then \code{NULL},
 \code{\link[=ak_topography]{ak_topography()}} conditions the DEM again, and the check plot has no
 hillshade to fall back on when imagery is unavailable.}
+
+\item{window}{The first window instead of the square of \code{start_buffer_m}:
+an sf, sfc or bbox object (its bounding box), or \code{c(xmin, ymin, xmax, ymax)} in EPSG:3338, used as given (extended only to hold the point and
+its snap radius). The catchment should fit inside with room to spare,
+e.g. \code{sf::st_buffer(hand_drawn_polygon, 2000)}; a window it reaches
+grows as usual. \code{NULL} (default): the square, then the coarse pass or
+side by side growth (see Window).}
+
+\item{depressions}{How depressions are removed before flow routing
+(WhiteboxTools):
+\itemize{
+\item \code{"breach"} (default): every depression breached (BreachDepressions,
+Lindsay 2016), single-cell pits raised first. Fastest.
+\item \code{"least_cost"}: least-cost breach paths up to 100 cells long
+(BreachDepressionsLeastCost, Lindsay and Dhun 2015), the lowest-impact
+cut through a road embankment or other narrow barrier; what that
+leaves is breached as by \code{"breach"}, not filled. About 4.5 times
+slower.
+\item \code{"fill"}: depressions filled to their spill level (FillDepressions),
+the classic approach; flats then route arbitrarily.
+}
+
+In tests (IfSAR-like and real DEMs with noise added), \code{"breach"} and
+\code{"least_cost"} kept about as many catchments within IoU 0.95 of their
+noise-free version on a real DEM (88\% and 89\%), \code{"least_cost"} more on
+synthetic terrain full of closed depressions (84\% against 78\%), and
+\code{"fill"} fewer (76\% and 75\%). The methods disagree most where large
+closed depressions (thermokarst, kettle lakes) or roads decide the
+drainage; compare them there. Recorded in the \code{depressions} column.}
 }
 \value{
 An \code{ak_delineation} object: a list with \code{catchment} (one-row sf
@@ -93,8 +125,8 @@ with diagnostics and flags), \code{point}, \code{snapped}, \code{streams} (DEM-d
 channels), \code{flowlines} (reference, if any) and \code{files}: the DEM,
 breached DEM, D8 pointer and D8 accumulation of the final window,
 cropped to the catchment plus a margin and kept in the cache's
-\verb{delineation/<site_code>/<dem>_<extent>/} folder, so runs with another
-DEM or snap never overwrite them. Accumulation is computed on the whole
+\verb{delineation/<site_code>/<dem>_<depressions>_<extent>/} folder, so runs
+with another DEM, depression method or snap never overwrite them. Accumulation is computed on the whole
 window before cropping. \code{\link[=ak_topography]{ak_topography()}} and \code{\link[=ak_outlet_slope]{ak_outlet_slope()}} can
 use these files directly (\code{files} is \code{NULL} with \code{keep_rasters = FALSE}).
 With \code{snap_alternatives = TRUE} also
@@ -110,18 +142,39 @@ pointer and accumulation), \code{t_watershed_s} (snapping and watershed),
 and \code{t_total_s}, with \code{n_windows} (windows tried) and \code{window_mode}
 (\code{"site"}, or \code{"regional:<cluster>"} when the window was shared, in
 which case the DEM and conditioning time is the shared time divided
-among the cluster's sites). Use them to see where a run spends its time.
+among the cluster's sites). Use them to see where a run spends its time;
+for a long run, \code{options(AKCatchments.log = "stages.tsv")} also writes a
+line as each stage of each site ends (time, process, site, stage,
+seconds, detail), so an interrupted or slow run shows where it was.
 }
 \description{
 Fetches elevation data around the point, conditions it for flow routing
-(least-cost breaching, D8 directions and accumulation, WhiteboxTools),
+(depressions breached or filled, D8 directions and accumulation, WhiteboxTools),
 snaps the point onto the channel network, delineates the upstream area and
-runs the checks described in \link{delineation_flags}. The window grows (doubling)
-until the catchment no longer touches its edge; for very large windows the
-cell size coarsens so a window never exceeds \code{max_cells} a side, and the
-resolution actually used is reported in \code{dem_res_m}.
+runs the checks described in \link{delineation_flags}.
 }
 \details{
+Window. The first window is a square of half-width \code{start_buffer_m}
+around the point, or \code{window} if given. While the catchment reaches the
+window's edge, only the sides it touches move out, each to twice its
+distance from the point (at least 2 km further), up to \code{max_buffer_m}.
+A catchment cut off by the first square instead gets a window sized by a
+quick pass over the same DEM at 100 m: the 100 m catchment of the lowest
+100 m channel inside the part already delineated, plus 1 km. So a large
+catchment is conditioned twice, on the small square and on its own window,
+rather than once per doubling. The pass only sizes the window: the
+catchment is the full-resolution DEM's, and where it still touches that
+window, the touched sides move out by half its width or height.
+Where a window's long side is more than \code{max_cells} cells, the cell size
+coarsens to the next of 1.25, 1.5, 2, 2.5, 3, 4, 5, ... times the source's
+own (6.25, 7.5, 10, 12.5, 15, 20, 25 m for IfSAR), so windows of similar
+size share their DEM tiles. The cell size used is in \code{dem_res_m}, the window in
+\code{window_xmin}, \code{window_ymin}, \code{window_xmax}, \code{window_ymax} (EPSG:3338)
+and how it was chosen in \code{window_plan} (\code{"square"}, \code{"coarse"} or
+\code{"given"}). To repeat a delineation on the same grid (other snap radii,
+shifted points), pass those four values as \code{window} and \code{dem_res_m} as
+\code{res}.
+
 Snapping. A sample point rarely sits exactly on the DEM channel. Within
 \code{snap_dist_m} the point moves to a channel cell (contributing area of at
 least \code{stream_threshold_km2}):

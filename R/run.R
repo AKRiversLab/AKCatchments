@@ -4,7 +4,12 @@
 #' site it is on (in scripts and knitr the bar is printed every few
 #' seconds; `options(AKCatchments.progress = FALSE)` turns bars off). Set `options(AKCatchments.verbose = TRUE)` to
 #' also get one line per finished site with its time, which is what you want
-#' in the log of a long batch job. A failure at one site is recorded in
+#' in the log of a long batch job, and `options(AKCatchments.log = file)`
+#' for a tab-separated line as each stage of each delineation ends (DEM
+#' window, conditioning, watershed, flowlines, plot; workers included), so a
+#' slow or interrupted run shows which site and stage it was in. A
+#' long [ak_catchments()] run can also save each site as it finishes
+#' (`checkpoint_dir`) and resume from them. A failure at one site is recorded in
 #' `attr(x, "errors")` (`site_code`, `step`, `error`) and does not stop the
 #' others.
 #'
@@ -97,14 +102,14 @@ worker_state <- function(n_workers = 1) {
   cores <- tryCatch(parallel::detectCores(logical = FALSE), error = \(e) NA_integer_)
   list(cache = cache_root(), exe = if (length(exe) && file.exists(exe)) exe,
        threads = getOption("AKCatchments.wbt_threads") %||% max(1L, (cores %|NA|% 1L) %/% max(1L, n_workers)),
-       verbose = isTRUE(getOption("AKCatchments.verbose")))
+       verbose = isTRUE(getOption("AKCatchments.verbose")), log = getOption("AKCatchments.log"))
 }
 
 `%|NA|%` <- function(a, b) if (length(a) && !is.na(a)) a else b
 
 worker_init <- function(s) {
   if (!is.null(s$cache)) options(AKCatchments.cache = s$cache)
-  options(AKCatchments.verbose = s$verbose)
+  options(AKCatchments.verbose = s$verbose, AKCatchments.log = s$log)
   if (!is.null(s$exe)) suppressMessages(whitebox::wbt_init(exe_path = s$exe))
   wbt_threads(s$threads)
   invisible(TRUE)

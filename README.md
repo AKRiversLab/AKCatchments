@@ -124,15 +124,18 @@ What happens:
 1. **DEM.** `dem_source = "ifsar"` (default) pulls the Alaska IfSAR 5 m
    terrain model from the DGGS image service. `"copernicus"` uses Copernicus
    GLO-30; `"local"` reads your own tiles; `"elevatr"` is a last resort.
-2. **Conditioning.** Least-cost depression breaching, D8 flow directions
-   and accumulation (WhiteboxTools).
+2. **Conditioning.** Depressions breached (`depressions = "breach"`;
+   least-cost breaching or filling on request), D8 flow directions and
+   accumulation (WhiteboxTools).
 3. **Snapping.** The point moves to a channel cell within `snap_dist_m`
    (150 m). With a known area (`ref_area_km2`) it goes to the cell whose
    contributing area matches best; otherwise to the largest channel in reach
    (`snap = "largest"`) or the nearest (`snap = "nearest"`).
 4. **Window growth.** If the catchment touches the edge of the DEM window,
-   the window doubles (coarsening the cell size for very large basins) and
-   the delineation is repeated. Running into missing elevation data is
+   the sides it touches move out (coarsening the cell size for very large
+   basins) and the delineation is repeated; a catchment the first square
+   cuts off goes straight to a window sized by a quick 100 m pass over the
+   same DEM. Running into missing elevation data is
    flagged instead (`nodata_edge`), since a bigger window can't fix it.
    A point with no elevation data at all (outside Alaska, offshore, lat and
    lon swapped) stops with a message saying so.

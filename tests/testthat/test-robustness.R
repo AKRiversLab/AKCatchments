@@ -49,7 +49,8 @@ test_that("a catchment running into missing elevation data is flagged, not widen
                                      start_buffer_m = 10000, max_buffer_m = 20000, flowlines = NULL, plot = FALSE))
   expect_true(d$catchment$nodata_edge)
   expect_false(d$catchment$truncated)
-  expect_equal(d$catchment$window_m, 10000)                       # no pointless widening
+  expect_equal(d$catchment$n_windows, 1)                          # no pointless widening
+  expect_lt(abs(d$catchment$window_m - 10000), 20)                # the window as fetched, on the DEM's 20 m grid
   expect_match(d$catchment$flags, "nodata_edge")
   expect_false(d$catchment$delin_ok)
   inside_gap <- xy_to_ll(s$x0, s$y0 + 7000)
@@ -232,4 +233,30 @@ test_that("there is no default cache: the user has to choose one", {
   env <- Sys.getenv("AKCATCHMENTS_CACHE"); Sys.unsetenv("AKCATCHMENTS_CACHE")
   on.exit(if (nzchar(env)) Sys.setenv(AKCATCHMENTS_CACHE = env), add = TRUE)
   expect_error(ak_cache_dir(), "ak_set_cache")
+})
+
+test_that("a filling run that fails is tried again", {
+  skip_if_not(wbt_available(), "WhiteboxTools not installed")
+  s <- synthetic_dem(tempfile("dem_synth_"))
+  dem <- terra::rast(file.path(s$dir, "synthetic_dem.tif"))
+  fill <- whitebox::wbt_fill_depressions
+  tries <- 0
+  # the first try writes nothing, as when the tool panics
+  local_mocked_bindings(wbt_fill_depressions = function(...) if ((tries <<- tries + 1) > 1) fill(...), .package = "whitebox")
+  f <- ak_condition(dem, withr::local_tempdir(), "fill")
+  expect_equal(tries, 2)
+  expect_true(all(file.exists(unlist(f))))
+})
+
+test_that("outputs WhiteboxTools did not write stop the run, and the last run's rasters are not used", {
+  skip_if_not(wbt_available(), "WhiteboxTools not installed")
+  s <- synthetic_dem(tempfile("dem_synth_"))
+  dem <- terra::rast(file.path(s$dir, "synthetic_dem.tif"))
+  dir <- withr::local_tempdir()
+  f <- ak_condition(dem, dir)
+  expect_true(all(file.exists(unlist(f))))
+  # breaching writes nothing (as when the tool fails) on a second, smaller window in the same folder
+  local_mocked_bindings(wbt_breach_depressions = function(...) invisible(), .package = "whitebox")
+  expect_error(suppressMessages(ak_condition(terra::crop(dem, terra::ext(dem) - 1000), dir)),
+               "did not write breached.tif, d8_pointer.tif, d8_accum.tif")
 })

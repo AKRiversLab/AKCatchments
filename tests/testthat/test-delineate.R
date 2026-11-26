@@ -39,6 +39,27 @@ test_that("keep_rasters = FALSE keeps only the polygon, on its own window or a s
   expect_false(dir.exists(file.path(cache, "delineation")))
 })
 
+test_that("each depression method delineates the basin, is recorded and keeps its rasters apart", {
+  skip_if_not(wbt_available(), "WhiteboxTools not installed")
+  old <- options(AKCatchments.cache = tempfile("akcache_"))
+  on.exit(options(old), add = TRUE)
+  s <- synthetic_dem(tempfile("dem_synth_"))
+  ll <- xy_to_ll(s$x0 + 60, s$y0 + 200)
+  args <- list(dem_source = "local", dem_dir = s$dir, start_buffer_m = 5000, max_buffer_m = 10000, flowlines = NULL, plot = FALSE)
+  d <- lapply(c(breach = "breach", least_cost = "least_cost", fill = "fill"),
+              \(m) do.call(ak_delineate, c(list(ll[2], ll[1], site_code = "SYN-M", depressions = m), args)))
+  expect_equal(unname(vapply(d, \(x) x$catchment$depressions, "")), names(d))
+  for (x in d) expect_equal(x$catchment$area_km2, s$area_km2, tolerance = 0.1)
+  expect_length(unique(vapply(d, \(x) dirname(x$files$filled), "")), 3)
+  expect_equal(formals(ak_delineate)$depressions[[2]], "breach")
+  expect_error(do.call(ak_delineate, c(list(ll[2], ll[1], depressions = "carve"), args)), "should be one of")
+  pts <- data.frame(site_code = c("M1", "M2"), lat = ll[[2]], lon = ll[[1]] + c(0, 0.0005))
+  x <- suppressMessages(do.call(ak_catchments, c(list(pts, regional = TRUE, depressions = "fill"),
+                                                 utils::modifyList(args, list(start_buffer_m = 10000)))))
+  expect_match(x$window_mode, "^regional")
+  expect_equal(x$depressions, c("fill", "fill"))
+})
+
 test_that("a known area guides snapping and a wrong one is flagged", {
   skip_if_not(wbt_available(), "WhiteboxTools not installed")
   old <- options(AKCatchments.cache = tempfile("akcache_"))
