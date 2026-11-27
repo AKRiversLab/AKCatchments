@@ -186,7 +186,7 @@ log_download <- function(url, dest) {
   row <- data.frame(file = substring(d, nchar(root) + 2), url = url, bytes = file.size(dest),
                     downloaded_utc = format(Sys.time(), "%Y-%m-%d %H:%M:%S", tz = "UTC"),
                     package_version = tryCatch(as.character(utils::packageVersion("AKCatchments")), error = \(e) NA))
-  try(utils::write.table(row, man, sep = ",", row.names = FALSE, col.names = !file.exists(man), append = file.exists(man)),
+  try(utils::write.table(row, man, sep = ",", qmethod = "double", row.names = FALSE, col.names = !file.exists(man), append = file.exists(man)),
       silent = TRUE)
   invisible()
 }
